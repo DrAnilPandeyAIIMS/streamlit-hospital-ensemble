@@ -1,0 +1,43 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+venv/
+.env/
+
+# Streamlit secrets and cache
+.streamlit/secrets.toml
+.streamlit/config.toml
+.streamlit/*.json
+.cache/
+*.log
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# System files
+.DS_Store
+Thumbs.db
+
+# Model and output files (if large or sensitive)
+*.h5
+*.pb
+*.tflite
+*.pkl
+*.joblib
+*.sav
+*.npz
+*.npy
+
+# VS Code settings (optional)
+.vscode/
+
+# Environment settings
+*.env
+
+# TensorFlow logs and checkpoints
+checkpoint
+events.out.tfevents.*
+*.ckpt

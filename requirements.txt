@@ -1,0 +1,7 @@
+streamlit
+numpy
+pandas
+scikit-learn
+tensorflow==2.13.0
+tensorflow-probability==0.21.0
+joblib
