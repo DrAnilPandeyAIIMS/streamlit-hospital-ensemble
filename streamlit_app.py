@@ -8,21 +8,10 @@ import tensorflow_probability as tfp
 import joblib
 import json
 from sklearn.isotonic import IsotonicRegression
-from sklearn.preprocessing import StandardScaler
 
 tfd = tfp.distributions
-tfpl = tfp.layers
 
-# Load artifacts
-scaler, columns_to_scale = joblib.load("models/scaler.pkl")
-feature_names = joblib.load("models/feature_names.pkl")
-iso_reg = joblib.load("models/iso_reg.pkl")
-
-with open('best_threshold.json', 'r') as f:
-    best_threshold = json.load(f)['best_threshold']
-
-# Register custom objects
-@tf.keras.utils.register_keras_serializable()
+# --- Custom prior ---
 def prior(kernel_size, bias_size, dtype=None):
     n = kernel_size + bias_size
     return tf.keras.Sequential([
@@ -30,7 +19,7 @@ def prior(kernel_size, bias_size, dtype=None):
         tfp.layers.DistributionLambda(lambda t: tfd.MultivariateNormalDiag(loc=t, scale_diag=tf.ones_like(t)))
     ])
 
-@tf.keras.utils.register_keras_serializable()
+# --- Custom posterior ---
 def posterior(kernel_size, bias_size, dtype=None):
     n = kernel_size + bias_size
     return tf.keras.Sequential([
@@ -38,27 +27,60 @@ def posterior(kernel_size, bias_size, dtype=None):
         tfp.layers.IndependentNormal(n, convert_to_tensor_fn=tfd.Distribution.sample),
     ])
 
-def negative_log_likelihood(true_labels, predicted_labels):
-    true_labels = tf.cast(true_labels, tf.float32)
-    dist = tfd.Normal(loc=predicted_labels, scale=1)
-    return -tf.reduce_mean(dist.log_prob(true_labels))
+# --- Custom loss ---
+def negative_log_likelihood_bernoulli(y_true, logits):
+    predicted_distribution = tfd.Bernoulli(logits=logits)
+    return -tf.reduce_mean(predicted_distribution.log_prob(tf.cast(y_true, tf.float32)))
 
+# --- Custom layer ---
+class CustomDenseVariational(tfp.layers.DenseVariational):
+    def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
+        super().__init__(
+            units=units,
+            make_prior_fn=make_prior_fn,
+            make_posterior_fn=make_posterior_fn,
+            kl_weight=kl_weight,
+            **kwargs
+        )
+        self.units = units
+        self.make_prior_fn = make_prior_fn
+        self.make_posterior_fn = make_posterior_fn
+        self.kl_weight = kl_weight
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "units": self.units,
+            "make_prior_fn": "prior",
+            "make_posterior_fn": "posterior",
+            "kl_weight": self.kl_weight
+        })
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        config["make_prior_fn"] = prior
+        config["make_posterior_fn"] = posterior
+        return cls(**config)
+
+# --- Custom objects dict ---
 custom_objects = {
-    'DenseFlipout': tfpl.DenseFlipout,
-    'DenseFlipoutLayer': tfpl.DenseFlipout,
-    'DenseVariational': tfp.layers.DenseVariational,
+    'CustomDenseVariational': CustomDenseVariational,
+    'negative_log_likelihood_bernoulli': negative_log_likelihood_bernoulli,
     'prior': prior,
-    'posterior': posterior,
-    'KLDivergenceRegularizer': tfpl.KLDivergenceRegularizer,
-    'negative_log_likelihood': negative_log_likelihood
+    'posterior': posterior
 }
 
-# Load models
+# --- Load models ---
 vae_model = tf.keras.models.load_model("models/vae_model.h5")
-model_2 = tf.keras.models.load_model("models/model_2_probabilistic", custom_objects=custom_objects)
+model_2 = tf.keras.models.load_model("models/model_2_probabilistic", custom_objects={
+    'DenseFlipoutLayer': tfp.layers.DenseFlipout,
+    'DenseFlipout': tfp.layers.DenseFlipout,
+    'negative_log_likelihood_bernoulli': negative_log_likelihood_bernoulli
+})
 bayesian_model = tf.keras.models.load_model("models/bayesian_model", custom_objects=custom_objects)
-ensemble_models = [vae_model, model_2, bayesian_model]
 
+ensemble_models = [vae_model, model_2, bayesian_model]
 # Prediction function
 def ensemble_models_predict_all(input_array, n_forward_passes=100):
     input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)
