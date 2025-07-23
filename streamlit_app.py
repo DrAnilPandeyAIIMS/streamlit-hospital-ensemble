@@ -8,6 +8,17 @@ import tensorflow_probability as tfp
 import joblib
 import json
 from sklearn.isotonic import IsotonicRegression
+import streamlit as st
+
+# Configure the page
+st.set_page_config(
+    page_title="Hospital Ensemble Predictor",
+    layout="centered",  # use 'wide' if you want to use more screen space
+    initial_sidebar_state="collapsed"
+)
+
+st.title("🏥 Hospital Mortality Predictor")
+st.markdown("Upload patient data or enter values to get predictions.")
 
 tfd = tfp.distributions
 scaler = joblib.load("models/scaler.pkl")
