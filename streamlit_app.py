@@ -10,14 +10,25 @@ import json
 from sklearn.isotonic import IsotonicRegression
 
 tfd = tfp.distributions
+scaler = joblib.load("models/scaler.pkl")
+feature_names = joblib.load("models/feature_names.pkl")
+iso_reg = joblib.load("models/iso_reg.pkl")
+
+# Load best threshold
+with open("best_threshold.json", "r") as f:
+    best_threshold = json.load(f)["threshold"]
 
 # --- Custom prior ---
 def prior(kernel_size, bias_size, dtype=None):
     n = kernel_size + bias_size
     return tf.keras.Sequential([
         tfp.layers.VariableLayer(n, dtype=dtype),
-        tfp.layers.DistributionLambda(lambda t: tfd.MultivariateNormalDiag(loc=t, scale_diag=tf.ones_like(t)))
+        tfp.layers.DistributionLambda(lambda t: tfd.MultivariateNormalDiag(
+            loc=t,
+            scale_diag=tf.ones_like(t)
+        ))
     ])
+
 
 # --- Custom posterior ---
 def posterior(kernel_size, bias_size, dtype=None):
@@ -27,9 +38,10 @@ def posterior(kernel_size, bias_size, dtype=None):
         tfp.layers.IndependentNormal(n, convert_to_tensor_fn=tfd.Distribution.sample),
     ])
 
+
 # --- Custom loss ---
 def negative_log_likelihood_bernoulli(y_true, logits):
-    predicted_distribution = tfd.Bernoulli(logits=logits)
+    predicted_distribution = tfp.distributions.Bernoulli(logits=logits)
     return -tf.reduce_mean(predicted_distribution.log_prob(tf.cast(y_true, tf.float32)))
 
 # --- Custom layer ---
