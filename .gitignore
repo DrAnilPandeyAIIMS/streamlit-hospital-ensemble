@@ -25,10 +25,10 @@ Thumbs.db
 *.h5
 *.pb
 *.tflite
-*.joblib
+# *.joblib
 *.sav
 *.npz
-*.npy
+#*.npy
 *.pkl
 
 # EXCEPT: allow .pkl, .joblib, .npy files inside models/ directory
