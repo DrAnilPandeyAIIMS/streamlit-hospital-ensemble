@@ -5,3 +5,4 @@ tensorflow==2.13.0
 tensorflow-probability==0.21.0
 joblib==1.4.2
 streamlit==1.40.1
+matplotlib==3.7.1
