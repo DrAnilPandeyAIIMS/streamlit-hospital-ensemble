@@ -93,12 +93,12 @@ custom_objects = {
 
 vae_model = tf.keras.models.load_model("models/vae_model.h5")
 model_2 = tf.keras.models.load_model(
-    "models/model_2_probabilistic",
+    "models/model_2_probabilistic.h5",  # use the .h5 file
     custom_objects={
-        'DenseFlipoutLayer': tfp.layers.DenseFlipout,
-        'DenseFlipout': tfp.layers.DenseFlipout,
-        'negative_log_likelihood_bernoulli': negative_log_likelihood_bernoulli,
-        'negative_log_likelihood': negative_log_likelihood_bernoulli
+        "DenseFlipoutLayer": DenseFlipoutLayer,
+        "DenseFlipout": tfp.layers.DenseFlipout,
+        "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
+        "negative_log_likelihood": negative_log_likelihood_bernoulli,
     }
 )
 
