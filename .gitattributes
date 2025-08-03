@@ -1,6 +1,8 @@
 *.h5 filter=lfs diff=lfs merge=lfs -text
 *.zip filter=lfs diff=lfs merge=lfs -text
 *.pkl filter=lfs diff=lfs merge=lfs -text
+*.pb filter=lfs diff=lfs merge=lfs -text
+models/bayesian_model_dir/variables/variables.data-00000-of-00001 filter=lfs diff=lfs merge=lfs -text
 models/feature_names.pkl !text !filter !merge !diff
 models/iso_reg.pkl !text !filter !merge !diff
 models/scaler.pkl !text !filter !merge !diff
