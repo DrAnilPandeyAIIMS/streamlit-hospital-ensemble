@@ -8,6 +8,7 @@ import joblib
 import json
 from sklearn.isotonic import IsotonicRegression
 import streamlit as st
+from custom_layers import DenseFlipoutLayer, negative_log_likelihood_bernoulli, build_probabilistic_model
 
 # Configure the page
 st.set_page_config(
