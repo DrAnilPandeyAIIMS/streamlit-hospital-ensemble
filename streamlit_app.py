@@ -103,7 +103,8 @@ model_2 = tf.keras.models.load_model(
     }
 )
 
-bayesian_model = tf.keras.models.load_model("models/bayesian_model", custom_objects=custom_objects)
+bayesian_model = tf.keras.models.load_model("models/bayesian_model.h5", custom_objects=custom_objects)
+
 ensemble_models = [vae_model, model_2, bayesian_model]
 
 def ensemble_models_predict_all(input_array, n_forward_passes=100):
