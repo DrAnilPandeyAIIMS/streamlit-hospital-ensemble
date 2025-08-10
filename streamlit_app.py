@@ -7,16 +7,18 @@ import tensorflow_probability as tfp
 import joblib
 import json
 from sklearn.isotonic import IsotonicRegression
-import streamlit as st
 from custom_layers import DenseFlipoutLayer, negative_log_likelihood_bernoulli, build_probabilistic_model
+import os
 
-# Configure the page
+# ✅ Configure the page first before any other Streamlit commands
 st.set_page_config(
     page_title="Hospital Ensemble Predictor",
     layout="centered",
     initial_sidebar_state="collapsed"
 )
 
+# ✅ Now start rendering content
+st.write("Current working directory:", os.getcwd())
 st.title("🏥 Hospital Mortality Predictor")
 st.markdown("Upload patient data or enter values to get predictions.")
 
@@ -24,6 +26,7 @@ tfd = tfp.distributions
 scaler = joblib.load("models/scaler.pkl")
 feature_names = joblib.load("models/feature_names.pkl")
 iso_reg = joblib.load("models/iso_reg.pkl")
+
 
 # Load best threshold
 with open("best_threshold.json", "r") as f:
@@ -86,15 +89,26 @@ class CustomDenseVariational(tfp.layers.DenseVariational):
 
 custom_objects = {
     'CustomDenseVariational': CustomDenseVariational,
-    'negative_log_likelihood': negative_log_likelihood_bernoulli, 
+    'negative_log_likelihood': negative_log_likelihood_bernoulli,
     'negative_log_likelihood_bernoulli': negative_log_likelihood_bernoulli,
     'prior': prior,
-    'posterior': posterior
+    'posterior': posterior,
+    'DenseFlipoutLayer': DenseFlipoutLayer,
+    'DenseFlipout': tfp.layers.DenseFlipout,
 }
 
-vae_model = tf.keras.models.load_model("models/vae_model.h5")
+# Load VAE model
+import os
+vae_model_path = os.path.join(os.getcwd(), "models", "vae_model.h5")
+vae_model = tf.keras.models.load_model(vae_model_path)
+
+# Load Flipout probabilistic model (model_2)
+import os
+
+base_dir = os.path.dirname(os.path.abspath(__file__))
+model_2_path = os.path.join(base_dir, "models", "model_2_probabilistic.h5")
 model_2 = tf.keras.models.load_model(
-    "models/model_2_probabilistic.h5",  # use the .h5 file
+    model_2_path,
     custom_objects={
         "DenseFlipoutLayer": DenseFlipoutLayer,
         "DenseFlipout": tfp.layers.DenseFlipout,
@@ -103,7 +117,13 @@ model_2 = tf.keras.models.load_model(
     }
 )
 
-bayesian_model = tf.keras.models.load_model("models/bayesian_model.h5", custom_objects=custom_objects)
+# Load Bayesian model
+bayesian_model = tf.keras.models.load_model(
+    r"C:\Users\akpan\Downloads\Project_2_backup\models\bayesian_model.h5",
+    custom_objects=custom_objects
+)
+
+
 
 ensemble_models = [vae_model, model_2, bayesian_model]
 
