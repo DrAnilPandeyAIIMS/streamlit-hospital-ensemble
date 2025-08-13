@@ -20,29 +20,24 @@ venv/
 # System files
 .DS_Store
 Thumbs.db
-
-# Model and output files (if large or sensitive)
-*.h5
-*.pb
-*.tflite
-# *.joblib
-*.sav
-*.npz
-#*.npy
-*.pkl
-
-# EXCEPT: allow .pkl, .joblib, .npy files inside models/ directory
+# EXCEPT: allow model files inside models/ directory
 !models/*.pkl
 !models/*.joblib
 !models/*.npy
 !models/*.h5
+
+# TensorFlow logs and checkpoints
+checkpoint
+events.out.tfevents.*
+*.ckpt
+models/bayesian_model_dir/variables/variables.data-00000-of-00001
+
 # VS Code settings (optional)
 .vscode/
 
 # Environment settings
 *.env
 
-# TensorFlow logs and checkpoints
-checkpoint
-events.out.tfevents.*
-*.ckpt
+# Large datasets (keep out of GitHub, store in Drive)
+data/
+datasets/
