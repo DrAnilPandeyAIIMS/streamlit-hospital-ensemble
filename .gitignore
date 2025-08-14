@@ -1,43 +1,82 @@
-# Python bytecode
+# ========================================
+# 1) MODELS — store these only in Google Drive
+# ========================================
+# Ignore all model file formats
+*.h5
+*.pkl
+*.joblib
+*.npy
+*.npz
+*.ckpt
+*.pb
+*.tflite
+*.onnx
+*.sav
+
+# Ignore TensorFlow/PyTorch artifacts
+**/checkpoint
+**/checkpoints
+**/saved_model/
+**/variables/
+**/logs/
+
+# Ignore model directories
+models/
+artifacts/
+output/
+
+ ========================================
+# 2) DATASETS — store these only in Google Drive
+# ========================================
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.json
+*.zip
+*.gz
+
+# Allow this specific JSON file to be tracked
+!best_threshold.json   
+# ========================================
+# 3) PYTHON CACHE & TEMP FILES
+# ========================================
 __pycache__/
 *.py[cod]
-*$py.class
+*.so
+*.ipynb_checkpoints
 
-# Virtual environment
+# ========================================
+# 4) ENVIRONMENT FILES
+# ========================================
+.env
+.venv/
+env/
 venv/
-.env/
+*.bak
 
-# Streamlit secrets and cache
-.streamlit/secrets.toml
-.streamlit/config.toml
-.streamlit/*.json
-.cache/
-*.log
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints/
-
-# System files
+# ========================================
+# 5) OS & EDITOR FILES
+# ========================================
 .DS_Store
 Thumbs.db
-# EXCEPT: allow model files inside models/ directory
-!models/*.pkl
-!models/*.joblib
-!models/*.npy
-!models/*.h5
-
-# TensorFlow logs and checkpoints
-checkpoint
-events.out.tfevents.*
-*.ckpt
-models/bayesian_model_dir/variables/variables.data-00000-of-00001
-
-# VS Code settings (optional)
 .vscode/
+.idea/
 
-# Environment settings
-*.env
-
-# Large datasets (keep out of GitHub, store in Drive)
-data/
-datasets/
+# ========================================
+# 6) ALLOWLIST — keep these in Git even if inside ignored dirs
+# ========================================
+!streamlit_app/**
+!custom_layers/**
+!requirements.txt
+!.gitignore
+!.gitattributes
+!README.md
+!LICENSE
+!predict_new_data_2/**
+!runtime/**
+!new_text/**
+!best_threshold
+!compressed/streamlit_app/**
