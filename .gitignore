@@ -1,7 +1,8 @@
 # ========================================
-# 1) MODELS — store these only in Google Drive
+# 1) MODELS — store large ones in Google Drive
 # ========================================
-# Ignore all model file formats
+
+# Ignore all model file formats by default
 *.h5
 *.pkl
 *.joblib
@@ -25,7 +26,13 @@ models/
 artifacts/
 output/
 
- ========================================
+# === ALLOW small config/model files ===
+!models/feature_names.pkl
+!models/iso_reg.pkl
+!models/scaler.pkl
+!models/y_test.npy
+
+# ========================================
 # 2) DATASETS — store these only in Google Drive
 # ========================================
 *.csv
@@ -39,7 +46,8 @@ output/
 *.gz
 
 # Allow this specific JSON file to be tracked
-!best_threshold.json   
+!best_threshold.json
+
 # ========================================
 # 3) PYTHON CACHE & TEMP FILES
 # ========================================
