@@ -1,9 +1,6 @@
 # ========================================
-# # ========================================
 # 1) MODELS — store large ones in Google Drive
 # ========================================
-
-# Ignore all model file formats by default
 *.h5
 *.pkl
 *.joblib
@@ -55,7 +52,7 @@ output/
 __pycache__/
 *.py[cod]
 *.so
-*.ipynb_checkpoints
+.ipynb_checkpoints/
 
 # ========================================
 # 4) ENVIRONMENT FILES
@@ -79,7 +76,6 @@ Thumbs.db
 # ========================================
 repo-full-backup.git/
 temp-repo.git/
-*.git/
 
 # ========================================
 # 7) ALLOWLIST — keep these in Git even if inside ignored dirs
