@@ -240,7 +240,7 @@ def ensemble_models_predict_all(input_array, n_forward_passes=100):
 # Helpers
 # -----------------------------
 def calculate_entropy(probs):
-    probs = np.clip(probs, 1e-9, 1 - 1e-9)
+    probs = np.clip(np.ravel(probs), 1e-9, 1 - 1e-9)  # ensure 1D
     return - (probs * np.log2(probs) + (1 - probs) * np.log2(1 - probs))
 
 def ensure_single_output(prob_vector):
