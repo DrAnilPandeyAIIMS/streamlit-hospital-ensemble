@@ -1,4 +1,5 @@
 # ========================================
+# # ========================================
 # 1) MODELS — store large ones in Google Drive
 # ========================================
 
@@ -74,7 +75,14 @@ Thumbs.db
 .idea/
 
 # ========================================
-# 6) ALLOWLIST — keep these in Git even if inside ignored dirs
+# 6) BACKUP GIT REPOS — never commit these
+# ========================================
+repo-full-backup.git/
+temp-repo.git/
+*.git/
+
+# ========================================
+# 7) ALLOWLIST — keep these in Git even if inside ignored dirs
 # ========================================
 !streamlit_app/**
 !custom_layers/**
