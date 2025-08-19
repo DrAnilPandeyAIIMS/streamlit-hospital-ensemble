@@ -92,3 +92,8 @@ temp-repo.git/
 !new_text/**
 !best_threshold
 !compressed/streamlit_app/**
+# ========================================
+# 8) STREAMLIT CONFIG — keep only local
+# ========================================
+.streamlit/
+
