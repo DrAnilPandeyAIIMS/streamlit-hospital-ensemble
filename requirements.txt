@@ -7,3 +7,5 @@ joblib==1.4.2
 streamlit==1.40.1
 matplotlib==3.7.1
 gdown==4.5.0
+protobuf==3.20.*
+altair==4.2.2
