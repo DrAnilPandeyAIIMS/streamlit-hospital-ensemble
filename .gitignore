@@ -94,6 +94,9 @@ temp-repo.git/
 !compressed/streamlit_app/**
 
 # ========================================
-# 8) STREAMLIT CONFIG — keep only local
+# 8) STREAMLIT CONFIG — include config for deployment
 # ========================================
-.streamlit/
+.streamlit/*
+!.streamlit/config.toml
+
+
