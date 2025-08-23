@@ -7,6 +7,8 @@ import os
 import time
 import json
 import warnings
+import sys
+sys.path.append(".")  # <-- ensure local modules like custom_layers are found
 import numpy as np
 import pandas as pd
 import streamlit as st
