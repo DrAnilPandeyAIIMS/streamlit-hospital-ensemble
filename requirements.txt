@@ -4,8 +4,8 @@ scikit-learn==1.2.1
 tensorflow==2.13.0
 tensorflow-probability==0.21.0
 joblib==1.4.2
-streamlit==1.24.0
 matplotlib==3.7.1
 gdown==4.5.0
 protobuf==3.20.*
 altair==4.2.2
+streamlit>=1.24,<1.27
