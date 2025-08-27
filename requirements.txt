@@ -10,7 +10,6 @@ async-lru==2.0.4
 attrs==25.3.0
 babel==2.17.0
 backcall==0.2.0
-backports.zoneinfo==0.2.1
 beautifulsoup4==4.12.3
 bleach==6.1.0
 blinker==1.8.2
@@ -148,7 +147,6 @@ tensorboard==2.13.0
 tensorboard-data-server==0.7.2
 tensorflow==2.13.0
 tensorflow-estimator==2.13.0
-tensorflow-intel==2.13.0
 tensorflow-io-gcs-filesystem==0.31.0
 tensorflow-probability==0.21.0
 termcolor==2.4.0
