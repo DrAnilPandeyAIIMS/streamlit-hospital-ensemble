@@ -24,7 +24,7 @@ Your file must be in `.csv` format (spreadsheet) and contain specific columns (l
 
 - App built with Streamlit
 - TensorFlow models (.h5 and SavedModel)
-- Python 3.10
+- Python 3.8.19
 - TFP version: 0.21
 - TensorFlow version: 2.13
 
