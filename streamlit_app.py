@@ -59,8 +59,19 @@ with st.sidebar:
 # -----------------------------
 # Load scalers, features, and isotonic regressor
 # -----------------------------
+# -----------------------------
+# Load scalers, features, and isotonic regressor
+# -----------------------------
 try:
     scaler = joblib.load("models/scaler.pkl")
+
+    # Handle case where scaler.pkl accidentally contains a tuple
+    if isinstance(scaler, tuple):
+        st.warning("⚠️ scaler.pkl contained a tuple. Using the first element as scaler.")
+        scaler = scaler[0]
+
+    st.write("Scaler type:", type(scaler))  # debug info, safe to remove later
+
 except Exception as e:
     st.error(f"❌ Could not load scaler.pkl from models/. Error: {e}")
     st.stop()
