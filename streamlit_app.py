@@ -63,36 +63,27 @@ with st.sidebar:
 # Load scalers, features, and isotonic regressor
 # -----------------------------
 # Load scaler and feature list
-try:
+@st.cache_resource
+def load_scaler():
     loaded = joblib.load("models/scaler.pkl")
-
     if isinstance(loaded, tuple):
-        scaler, scaler_features = loaded
-        st.success(f"✅ Scaler loaded as tuple with {len(scaler_features)} features")
-    else:
-        scaler = loaded
-        scaler_features = None
-        st.success("✅ Scaler loaded without feature list")
+        return loaded[0], loaded[1]
+    return loaded, None
 
-    st.write("Scaler type:", type(scaler))
-except Exception as e:
-    st.error(f"❌ Could not load scaler.pkl. Error: {e}")
-    st.stop()
+scaler, scaler_features = load_scaler()
 
-try:
-    feature_names = joblib.load("models/feature_names.pkl")
-    # Ensure feature_names is a list for indexing order
-    feature_names = list(feature_names)
-except Exception as e:
-    st.error(f"❌ Could not load feature_names.pkl from models/. Error: {e}")
-    st.stop()
 
-try:
-    iso_reg = joblib.load("models/iso_reg.pkl")
-except Exception as e:
-    st.error(f"❌ Could not load iso_reg.pkl from models/. Error: {e}")
-    st.stop()
+@st.cache_resource
+def load_feature_names():
+    return list(joblib.load("models/feature_names.pkl"))
 
+feature_names = load_feature_names()
+
+@st.cache_resource
+def load_iso_reg():
+    return joblib.load("models/iso_reg.pkl")
+
+iso_reg = load_iso_reg()
 try:
     with open("best_threshold.json", "r") as f:
         best_threshold = json.load(f)["best_threshold"]
@@ -203,19 +194,13 @@ def download_from_gdrive(file_id, output_path):
                 st.error(f"❌ Download failed for {output_path}. Error: {e}")
                 st.stop()
 
+@st.cache_resource
 def load_model_from_drive(model_key, custom_objects=None):
-    """Ensure model file is available, then load with tf.keras"""
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    try:
-        with st.spinner(f"🔧 Loading {model_key}..."):
-            model = tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
-        return model
-    except Exception as e:
-        st.error(f"❌ Failed to load {model_key} from {info['path']}. Error: {e}")
-        st.stop()
+    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
 
-# -----------------------------
+#-----------------------------------
 # Load models safely (Drive-aware)
 # -----------------------------
 vae_model = load_model_from_drive("vae_model")
