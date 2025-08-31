@@ -59,30 +59,38 @@ with st.sidebar:
 # -----------------------------
 # Load scalers, features, and isotonic regressor
 # -----------------------------
-# -----------------------------
-# Load scalers, features, and isotonic regressor
-# -----------------------------
-# Load scaler and feature list
 @st.cache_resource
-def load_scaler():
-    """Load the saved scaler (and features if available)."""
-    try:
-        loaded = joblib.load("models/scaler.pkl")
+def load_scaler_and_features():
+    """
+    Load scaler.pkl and robustly unpack it.
+    Accepts any of:
+      - a scaler instance
+      - (scaler, columns_to_scale)
+      - ((scaler, columns_to_scale), anything_else)  # defensive unwrap
+    Returns: (scaler, columns_to_scale_or_None)
+    """
+    obj = joblib.load("models/scaler.pkl")
 
-        # If scaler.pkl contains a tuple → (scaler, feature_names)
-        if isinstance(loaded, tuple):
-            scaler, features = loaded
+    scaler = obj
+    cols = None
+
+    if isinstance(obj, tuple):
+        if isinstance(obj[0], tuple):
+            inner = obj[0]
+            scaler = inner[0]
+            cols = inner[1] if len(inner) > 1 else None
         else:
-            scaler, features = loaded, None
+            scaler = obj[0]
+            cols = obj[1] if len(obj) > 1 else None
 
-        return scaler, features
+    if not hasattr(scaler, "transform"):
+        st.error(f"Loaded scaler is not a transformer. Type: {type(scaler)}. Value: {scaler}")
+        st.stop()
 
-    except Exception as e:
-        st.error(f"Error loading scaler: {e}")
-        return None, None
+    return scaler, cols
 
-# ✅ This will always unpack properly
-scaler, scaler_features = load_scaler()
+scaler, scaler_features = load_scaler_and_features()
+
 @st.cache_resource
 def load_iso_reg():
     return joblib.load("models/iso_reg.pkl")
@@ -165,7 +173,6 @@ custom_objects = {
 # -----------------------------
 # Google Drive file mapping
 # -----------------------------
-# NOTE: Corrected Bayesian model ID (observed earlier typo with 'Q' vs 'Z')
 MODEL_FILES = {
     "vae_model": {
         "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
@@ -176,7 +183,7 @@ MODEL_FILES = {
         "path": "models/model_2_probabilistic.h5",
     },
     "bayesian_model": {
-        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",  # ← ensure this is correct
+        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
         "path": "models/bayesian_model.h5",
     },
 }
@@ -187,7 +194,6 @@ def _ensure_models_dir(path: str):
         os.makedirs(d, exist_ok=True)
 
 def download_from_gdrive(file_id, output_path):
-    """Download a file from Google Drive if not already present locally"""
     _ensure_models_dir(output_path)
     if not os.path.exists(output_path):
         url = f"https://drive.google.com/uc?id={file_id}"
@@ -204,9 +210,6 @@ def load_model_from_drive(model_key, custom_objects=None):
     download_from_gdrive(info["id"], info["path"])
     return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
 
-#-----------------------------------
-# Load models safely (Drive-aware)
-# -----------------------------
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic", custom_objects=custom_objects)
 bayesian_model = load_model_from_drive("bayesian_model", custom_objects=custom_objects)
@@ -216,21 +219,13 @@ ensemble_models = [vae_model, model_2, bayesian_model]
 # Ensemble prediction function
 # -----------------------------
 def ensemble_models_predict_all(input_array, n_forward_passes=100):
-    """
-    Runs:
-      - Deterministic pass on VAE head (replicated n times)
-      - n stochastic passes on Flipout model and Bayesian model
-    Returns a (n_models_passes, n_samples) array of probabilities.
-    """
     input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)
     all_model_probs = []
 
-    # VAE: deterministic forward, replicate to match sampling size
     vae_probs = vae_model(input_tensor, training=False).numpy().flatten()
     vae_stack = np.stack([vae_probs] * n_forward_passes)
     all_model_probs.append(vae_stack)
 
-    # Stochastic models: sample with training=True
     for model in [model_2, bayesian_model]:
         model_probs = [
             model(input_tensor, training=True).numpy().flatten()
@@ -238,29 +233,31 @@ def ensemble_models_predict_all(input_array, n_forward_passes=100):
         ]
         all_model_probs.append(np.array(model_probs))
 
-    all_model_probs = np.concatenate(all_model_probs, axis=0)  # shape: (3 * n_forward, N)
+    all_model_probs = np.concatenate(all_model_probs, axis=0)
     return all_model_probs
 
 # -----------------------------
 # Helpers
 # -----------------------------
 def calculate_entropy(probs):
-    probs = np.clip(np.ravel(probs), 1e-9, 1 - 1e-9)  # ensure 1D
+    probs = np.clip(np.ravel(probs), 1e-9, 1 - 1e-9)
     return - (probs * np.log2(probs) + (1 - probs) * np.log2(1 - probs))
 
 def ensure_single_output(prob_vector):
-    """
-    Ensure the model output is a single column per sample.
-    If model returns Nx1, squeeze; if it returns logits, apply sigmoid.
-    """
     arr = np.array(prob_vector)
-    # If shape is (N,1) → flatten
     if arr.ndim == 2 and arr.shape[1] == 1:
         arr = arr.ravel()
-    # If any values are outside [0,1], apply sigmoid as a fallback
     if (arr < 0).any() or (arr > 1).any():
         arr = 1.0 / (1.0 + np.exp(-arr))
     return arr
+
+def scale_dataframe(df: pd.DataFrame, scaler, cols_to_scale=None) -> pd.DataFrame:
+    df = df.copy().fillna(0.0)
+    if cols_to_scale is not None and len(cols_to_scale) > 0:
+        df[cols_to_scale] = scaler.transform(df[cols_to_scale])
+    else:
+        df[df.columns] = scaler.transform(df[df.columns])
+    return df
 
 # -----------------------------
 # Streamlit UI – File upload path
@@ -282,31 +279,23 @@ if uploaded_file is not None:
     if missing_cols:
         st.error(f"❌ Missing required fields: {missing_cols}")
     else:
-        # Reorder & fill missing with 0.0
         input_df = input_df[feature_names].fillna(0.0)
 
-        # Scale safely
         try:
-            if scaler_features is not None:
-                input_df[scaler_features] = scaler.transform(input_df[scaler_features])
-            else:
-                input_df[input_df.columns] = scaler.transform(input_df[input_df.columns])
+            input_df = scale_dataframe(input_df, scaler, scaler_features)
         except Exception as e:
             st.error(f"❌ Scaling error: {e}")
             st.stop()
 
-        # Convert to numpy array
-        input_array = input_df.values    
+        input_array = input_df.values
 
-        # Predict ensemble
         all_probs = ensemble_models_predict_all(input_array)
         mean_probs = np.mean(all_probs, axis=0)
-        mean_probs = ensure_single_output(mean_probs)  # Ensure single column probabilities
+        mean_probs = ensure_single_output(mean_probs)
 
         std_devs = np.std(all_probs, axis=0)
         entropy = calculate_entropy(mean_probs)
 
-        # Isotonic calibration expects 1D
         try:
             calibrated_probs = iso_reg.predict(mean_probs)
         except Exception:
@@ -314,7 +303,6 @@ if uploaded_file is not None:
 
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # Results
         results_df = input_df.copy()
         results_df["raw_probability"] = mean_probs
         results_df["calibrated_probability"] = calibrated_probs
@@ -340,7 +328,6 @@ else:
     with st.form("manual_form"):
         manual_data = {}
         for feature in feature_names:
-            # Keep your original boolean-style mapping if you had any; otherwise numeric
             if feature.lower() in ["comorbidity", "on_ventilator", "diabetic", "hypertensive"]:
                 manual_data[feature] = st.selectbox(f"{feature}", ["No", "Yes"], index=0)
             else:
@@ -351,22 +338,20 @@ else:
         if submitted:
             df_input = pd.DataFrame([manual_data])
 
-            # Convert Yes/No → 1/0
             for col in df_input.columns:
                 if df_input[col].dtype == object:
                     df_input[col] = df_input[col].map({"Yes": 1, "No": 0}).fillna(0)
 
-            df_input = df_input[feature_names].fillna(0)
+            df_input = df_input[feature_names].fillna(0.0)
 
             try:
-                df_input[df_input.columns] = scaler.transform(df_input[df_input.columns])
+                df_input = scale_dataframe(df_input, scaler, scaler_features)
             except Exception as e:
                 st.error(f"❌ Scaling error: {e}")
                 st.stop()
 
             input_array = df_input.values
 
-            # Predict ensemble
             all_probs = ensemble_models_predict_all(input_array)
             mean_probs = np.mean(all_probs, axis=0)
             mean_probs = ensure_single_output(mean_probs)
@@ -374,7 +359,6 @@ else:
             std_devs = np.std(all_probs, axis=0)
             entropy = calculate_entropy(mean_probs)
 
-            # Isotonic calibration
             try:
                 calibrated_probs = iso_reg.predict(mean_probs)
             except Exception:
