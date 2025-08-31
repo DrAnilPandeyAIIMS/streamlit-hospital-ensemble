@@ -398,11 +398,14 @@ if uploaded_file is not None:
 # -----------------------------
 # UI — Manual entry path
 # -----------------------------
+# -----------------------------
+# Streamlit UI – Manual entry path
+# -----------------------------
 else:
     st.subheader("📋 Enter Patient Data Manually")
 
-    # list of binary/categorical features we want as Yes/No selectboxes
-    binary_features = [
+    # Define categorical (binary) features
+    categorical_features = {
         "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
         "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
         "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
@@ -412,15 +415,14 @@ else:
         "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
         "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
         "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
-    ]
+    }
 
     with st.form("manual_form"):
         manual_data = {}
         for feature in feature_names:
-            if feature in binary_features:
+            if feature in categorical_features:
                 manual_data[feature] = st.selectbox(f"{feature}", ["No", "Yes"], index=0)
             else:
-                # numeric / ordinal fields
                 manual_data[feature] = st.number_input(f"{feature}", step=0.1, value=0.0)
 
         submitted = st.form_submit_button("Predict")
@@ -428,20 +430,21 @@ else:
         if submitted:
             df_input = pd.DataFrame([manual_data])
 
-            # Convert Yes/No -> 1/0
-            for col in df_input.columns:
-                if df_input[col].dtype == object:
+            # Convert Yes/No → 1/0 for categorical features
+            for col in categorical_features:
+                if col in df_input.columns:
                     df_input[col] = df_input[col].map({"Yes": 1, "No": 0}).fillna(0)
 
-            # Reorder and fill missing
+            # Reorder columns
             df_input = df_input[feature_names].fillna(0.0)
 
-            # Scale numeric columns only (using saved cols if available)
+            # Scale numeric features
             try:
                 df_input = scale_dataframe(df_input, scaler, scaler_features)
             except Exception as e:
                 st.error(f"❌ Scaling error: {e}")
                 st.stop()
+
 
             input_array = df_input.values
 
