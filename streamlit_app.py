@@ -62,34 +62,20 @@ with st.sidebar:
 @st.cache_resource
 def load_scaler_and_features():
     """
-    Load scaler.pkl and robustly unpack it.
-    Accepts any of:
-      - a scaler instance
-      - (scaler, columns_to_scale)
-      - ((scaler, columns_to_scale), anything_else)  # defensive unwrap
-    Returns: (scaler, columns_to_scale_or_None)
+    Load scaler.pkl correctly.
+    scaler.pkl contains (scaler, numeric_columns)
     """
     obj = joblib.load("models/scaler.pkl")
 
-    scaler = obj
-    cols = None
-
-    if isinstance(obj, tuple):
-        if isinstance(obj[0], tuple):
-            inner = obj[0]
-            scaler = inner[0]
-            cols = inner[1] if len(inner) > 1 else None
-        else:
-            scaler = obj[0]
-            cols = obj[1] if len(obj) > 1 else None
-
-    if not hasattr(scaler, "transform"):
-        st.error(f"Loaded scaler is not a transformer. Type: {type(scaler)}. Value: {scaler}")
+    if isinstance(obj, tuple) and hasattr(obj[0], "transform"):
+        scaler, cols = obj
+    elif hasattr(obj, "transform"):
+        scaler, cols = obj, None
+    else:
+        st.error(f"❌ scaler.pkl did not contain a valid scaler. Got: {type(obj)}")
         st.stop()
 
     return scaler, cols
-
-scaler, scaler_features = load_scaler_and_features()
 
 @st.cache_resource
 def load_iso_reg():
