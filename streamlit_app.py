@@ -1,14 +1,10 @@
 # streamlit_app.py
-
-# -----------------------------
-# Imports
-# -----------------------------
 import os
 import time
 import json
 import warnings
 import sys
-sys.path.append(".")  # <-- ensure local modules like custom_layers are found
+sys.path.append(".")
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -17,6 +13,11 @@ import tensorflow_probability as tfp
 import joblib
 import gdown
 from sklearn.isotonic import IsotonicRegression
+
+# Google Sheets
+import gspread
+from google.oauth2.service_account import Credentials
+
 from custom_layers import (
     DenseFlipoutLayer,
     negative_log_likelihood_bernoulli,
@@ -34,7 +35,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# Helpful header info
 st.write("Current working directory:", os.getcwd())
 st.title("🏥 Hospital Mortality Predictor")
 st.markdown("Upload patient data or enter values to get predictions.")
@@ -57,31 +57,65 @@ with st.sidebar:
         st.rerun()
 
 # -----------------------------
-# Load scalers, features, and isotonic regressor
+# Helpers: load scaler robustly
 # -----------------------------
 @st.cache_resource
 def load_scaler_and_features():
     """
-    Load scaler.pkl correctly.
-    scaler.pkl contains (scaler, numeric_columns)
+    Load models/scaler.pkl which may be:
+      - a scaler object
+      - (scaler, list_of_columns_to_scale)
+      - nested tuple variations
+    Returns (scaler, cols_list_or_None)
     """
     obj = joblib.load("models/scaler.pkl")
 
-    if isinstance(obj, tuple) and hasattr(obj[0], "transform"):
-        scaler, cols = obj
-    elif hasattr(obj, "transform"):
-        scaler, cols = obj, None
+    # unwrap defensively
+    scaler = None
+    cols = None
+
+    if isinstance(obj, tuple):
+        # common case: (scaler, cols)
+        if hasattr(obj[0], "transform"):
+            scaler = obj[0]
+            cols = obj[1] if len(obj) > 1 else None
+        elif isinstance(obj[0], tuple) and hasattr(obj[0][0], "transform"):
+            scaler = obj[0][0]
+            cols = obj[0][1] if len(obj[0]) > 1 else None
+        else:
+            # fallback: try to find first transformable element
+            for el in obj:
+                if hasattr(el, "transform"):
+                    scaler = el
+                    break
     else:
-        st.error(f"❌ scaler.pkl did not contain a valid scaler. Got: {type(obj)}")
-        st.stop()
+        if hasattr(obj, "transform"):
+            scaler = obj
+        else:
+            scaler = None
+
+    if scaler is None or not hasattr(scaler, "transform"):
+        raise RuntimeError(f"Loaded scaler.pkl did not produce a transformer. Got: {type(obj)}")
 
     return scaler, cols
+
+scaler, scaler_features = load_scaler_and_features()
+
+# -----------------------------
+# Load feature names & iso reg / threshold
+# -----------------------------
+try:
+    feature_names = list(joblib.load("models/feature_names.pkl"))
+except Exception as e:
+    st.error(f"❌ Could not load feature_names.pkl. Error: {e}")
+    st.stop()
 
 @st.cache_resource
 def load_iso_reg():
     return joblib.load("models/iso_reg.pkl")
 
 iso_reg = load_iso_reg()
+
 try:
     with open("best_threshold.json", "r") as f:
         best_threshold = json.load(f)["best_threshold"]
@@ -114,7 +148,7 @@ def posterior(kernel_size, bias_size, dtype=None):
     ])
 
 # -----------------------------
-# Custom Dense Variational Layer
+# Custom classes (for loading models)
 # -----------------------------
 class CustomDenseVariational(tfp.layers.DenseVariational):
     def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
@@ -157,21 +191,12 @@ custom_objects = {
 }
 
 # -----------------------------
-# Google Drive file mapping
+# Google Drive model mapping & loader
 # -----------------------------
 MODEL_FILES = {
-    "vae_model": {
-        "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
-        "path": "models/vae_model.h5",
-    },
-    "model_2_probabilistic": {
-        "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
-        "path": "models/model_2_probabilistic.h5",
-    },
-    "bayesian_model": {
-        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
-        "path": "models/bayesian_model.h5",
-    },
+    "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model.h5"},
+    "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic.h5"},
+    "bayesian_model": {"id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp", "path": "models/bayesian_model.h5"},
 }
 
 def _ensure_models_dir(path: str):
@@ -223,7 +248,7 @@ def ensemble_models_predict_all(input_array, n_forward_passes=100):
     return all_model_probs
 
 # -----------------------------
-# Helpers
+# Misc helpers
 # -----------------------------
 def calculate_entropy(probs):
     probs = np.clip(np.ravel(probs), 1e-9, 1 - 1e-9)
@@ -238,15 +263,76 @@ def ensure_single_output(prob_vector):
     return arr
 
 def scale_dataframe(df: pd.DataFrame, scaler, cols_to_scale=None) -> pd.DataFrame:
+    """
+    Fill NaNs, then scale either:
+      - the provided cols_to_scale (if not None)
+      - otherwise, try to scale numeric columns only
+    """
     df = df.copy().fillna(0.0)
+
     if cols_to_scale is not None and len(cols_to_scale) > 0:
-        df[cols_to_scale] = scaler.transform(df[cols_to_scale])
+        cols = [c for c in cols_to_scale if c in df.columns]
+        if len(cols) == 0:
+            # nothing to scale
+            return df
+        # ensure numeric dtype
+        df[cols] = df[cols].apply(pd.to_numeric, errors="coerce").fillna(0.0)
+        df[cols] = scaler.transform(df[cols])
     else:
-        df[df.columns] = scaler.transform(df[df.columns])
+        # infer numeric columns
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        if len(numeric_cols) > 0:
+            df[numeric_cols] = scaler.transform(df[numeric_cols])
     return df
 
 # -----------------------------
-# Streamlit UI – File upload path
+# Google Sheets helper
+# -----------------------------
+def get_gs_client_from_secrets():
+    info = st.secrets.get("gcp_service_account")
+    if not info:
+        return None, "No gcp_service_account found in st.secrets"
+    try:
+        creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        client = gspread.authorize(creds)
+        return client, None
+    except Exception as e:
+        return None, str(e)
+
+def append_to_gsheet(row_dict):
+    client, err = get_gs_client_from_secrets()
+    if client is None:
+        return False, f"Google Sheets client error: {err}"
+
+    sheet_key = st.secrets.get("gsheet_key")
+    worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+    if not sheet_key:
+        return False, "No gsheet_key in st.secrets"
+
+    try:
+        sh = client.open_by_key(sheet_key)
+        try:
+            ws = sh.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols=str(len(row_dict) + 10))
+            # write header
+            ws.append_row(list(row_dict.keys()))
+        # Ensure header -> get header row
+        header = ws.row_values(1)
+        # Build row in header order (if header exists)
+        if header:
+            row = [row_dict.get(h, "") for h in header]
+        else:
+            header = list(row_dict.keys())
+            ws.append_row(header)
+            row = [row_dict.get(h, "") for h in header]
+        ws.append_row(row)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+# -----------------------------
+# UI — File upload path
 # -----------------------------
 st.header("Ensemble Model Predictor")
 uploaded_file = st.file_uploader("Upload Patient CSV File", type=["csv"])
@@ -261,62 +347,80 @@ if uploaded_file is not None:
     st.write("Uploaded Data:")
     st.dataframe(input_df)
 
-    missing_cols = set(feature_names) - set(input_df.columns)
-    if missing_cols:
-        st.error(f"❌ Missing required fields: {missing_cols}")
-    else:
-        input_df = input_df[feature_names].fillna(0.0)
+    # Add missing columns then reorder
+    for col in feature_names:
+        if col not in input_df.columns:
+            input_df[col] = 0.0
+    input_df = input_df[feature_names].fillna(0.0)
 
-        try:
-            input_df = scale_dataframe(input_df, scaler, scaler_features)
-        except Exception as e:
-            st.error(f"❌ Scaling error: {e}")
-            st.stop()
+    # Scale safely
+    try:
+        input_df = scale_dataframe(input_df, scaler, scaler_features)
+    except Exception as e:
+        st.error(f"❌ Scaling error: {e}")
+        st.stop()
 
-        input_array = input_df.values
+    input_array = input_df.values
 
-        all_probs = ensemble_models_predict_all(input_array)
-        mean_probs = np.mean(all_probs, axis=0)
-        mean_probs = ensure_single_output(mean_probs)
+    # Predict ensemble
+    all_probs = ensemble_models_predict_all(input_array)
+    mean_probs = np.mean(all_probs, axis=0)
+    mean_probs = ensure_single_output(mean_probs)
 
-        std_devs = np.std(all_probs, axis=0)
-        entropy = calculate_entropy(mean_probs)
+    std_devs = np.std(all_probs, axis=0)
+    entropy = calculate_entropy(mean_probs)
 
-        try:
-            calibrated_probs = iso_reg.predict(mean_probs)
-        except Exception:
-            calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
+    try:
+        calibrated_probs = iso_reg.predict(mean_probs)
+    except Exception:
+        calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
 
-        predicted_labels = (calibrated_probs >= best_threshold).astype(int)
+    predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        results_df = input_df.copy()
-        results_df["raw_probability"] = mean_probs
-        results_df["calibrated_probability"] = calibrated_probs
-        results_df["predicted_label"] = predicted_labels
-        results_df["std_deviation"] = std_devs
-        results_df["entropy"] = entropy
+    # Results
+    results_df = input_df.copy()
+    results_df["raw_probability"] = mean_probs
+    results_df["calibrated_probability"] = calibrated_probs
+    results_df["predicted_label"] = predicted_labels
+    results_df["std_deviation"] = std_devs
+    results_df["entropy"] = entropy
 
-        st.subheader("Prediction Results")
-        st.dataframe(results_df)
+    st.subheader("Prediction Results")
+    st.dataframe(results_df)
 
-        st.download_button(
-            "Download Results as CSV",
-            results_df.to_csv(index=False),
-            "predictions.csv",
-            "text/csv",
-        )
+    st.download_button(
+        "Download Results as CSV",
+        results_df.to_csv(index=False),
+        "predictions.csv",
+        "text/csv",
+    )
 
 # -----------------------------
-# Streamlit UI – Manual entry path
+# UI — Manual entry path
 # -----------------------------
 else:
     st.subheader("📋 Enter Patient Data Manually")
+
+    # list of binary/categorical features we want as Yes/No selectboxes
+    binary_features = [
+        "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
+        "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
+        "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
+        "Herniotomy", "Lithotomy", "Pyeloplasty", "Appendicectomy", "Omentoplasty",
+        "SmallBowelResection", "Laproscopic LysisOfAdhesions", "MRM",
+        "Hysterectomy", "Prostectomy", "DiagLaprot", "Nephrectomy", "Gastrectomy",
+        "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
+        "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
+        "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
+    ]
+
     with st.form("manual_form"):
         manual_data = {}
         for feature in feature_names:
-            if feature.lower() in ["comorbidity", "on_ventilator", "diabetic", "hypertensive"]:
+            if feature in binary_features:
                 manual_data[feature] = st.selectbox(f"{feature}", ["No", "Yes"], index=0)
             else:
+                # numeric / ordinal fields
                 manual_data[feature] = st.number_input(f"{feature}", step=0.1, value=0.0)
 
         submitted = st.form_submit_button("Predict")
@@ -324,12 +428,15 @@ else:
         if submitted:
             df_input = pd.DataFrame([manual_data])
 
+            # Convert Yes/No -> 1/0
             for col in df_input.columns:
                 if df_input[col].dtype == object:
                     df_input[col] = df_input[col].map({"Yes": 1, "No": 0}).fillna(0)
 
+            # Reorder and fill missing
             df_input = df_input[feature_names].fillna(0.0)
 
+            # Scale numeric columns only (using saved cols if available)
             try:
                 df_input = scale_dataframe(df_input, scaler, scaler_features)
             except Exception as e:
@@ -338,6 +445,7 @@ else:
 
             input_array = df_input.values
 
+            # Predict ensemble
             all_probs = ensemble_models_predict_all(input_array)
             mean_probs = np.mean(all_probs, axis=0)
             mean_probs = ensure_single_output(mean_probs)
@@ -358,3 +466,20 @@ else:
             st.write(f"**Predicted Label:** {'High Risk' if predicted_labels[0] == 1 else 'Low Risk'}")
             st.write(f"**Uncertainty (Std Dev):** {std_devs[0]:.3f}")
             st.write(f"**Entropy:** {entropy[0]:.3f}")
+
+            # Save to Google Sheet (if configured)
+            row_to_save = df_input.iloc[0].to_dict()
+            row_to_save.update({
+                "raw_probability": float(mean_probs[0]),
+                "calibrated_probability": float(calibrated_probs[0]),
+                "predicted_label": int(predicted_labels[0]),
+                "std_deviation": float(std_devs[0]),
+                "entropy": float(entropy[0]),
+                "timestamp": pd.Timestamp.now().isoformat()
+            })
+
+            ok, err = append_to_gsheet(row_to_save)
+            if ok:
+                st.success("✅ Saved prediction to Google Sheets.")
+            else:
+                st.warning(f"⚠️ Could not save to Google Sheets: {err}")
