@@ -65,20 +65,24 @@ with st.sidebar:
 # Load scaler and feature list
 @st.cache_resource
 def load_scaler():
-    loaded = joblib.load("models/scaler.pkl")
-    if isinstance(loaded, tuple):
-        return loaded[0], loaded[1]
-    return loaded, None
+    """Load the saved scaler (and features if available)."""
+    try:
+        loaded = joblib.load("models/scaler.pkl")
 
+        # If scaler.pkl contains a tuple → (scaler, feature_names)
+        if isinstance(loaded, tuple):
+            scaler, features = loaded
+        else:
+            scaler, features = loaded, None
+
+        return scaler, features
+
+    except Exception as e:
+        st.error(f"Error loading scaler: {e}")
+        return None, None
+
+# ✅ This will always unpack properly
 scaler, scaler_features = load_scaler()
-
-
-@st.cache_resource
-def load_feature_names():
-    return list(joblib.load("models/feature_names.pkl"))
-
-feature_names = load_feature_names()
-
 @st.cache_resource
 def load_iso_reg():
     return joblib.load("models/iso_reg.pkl")
@@ -278,17 +282,21 @@ if uploaded_file is not None:
     if missing_cols:
         st.error(f"❌ Missing required fields: {missing_cols}")
     else:
-        # Reorder & fill
-        input_df = input_df[feature_names].fillna(0)
+        # Reorder & fill missing with 0.0
+        input_df = input_df[feature_names].fillna(0.0)
 
-        # Scale
+        # Scale safely
         try:
-            input_df[input_df.columns] = scaler.transform(input_df[input_df.columns])
+            if scaler_features is not None:
+                input_df[scaler_features] = scaler.transform(input_df[scaler_features])
+            else:
+                input_df[input_df.columns] = scaler.transform(input_df[input_df.columns])
         except Exception as e:
             st.error(f"❌ Scaling error: {e}")
             st.stop()
 
-        input_array = input_df.values
+        # Convert to numpy array
+        input_array = input_df.values    
 
         # Predict ensemble
         all_probs = ensemble_models_predict_all(input_array)
@@ -298,11 +306,10 @@ if uploaded_file is not None:
         std_devs = np.std(all_probs, axis=0)
         entropy = calculate_entropy(mean_probs)
 
-        # Isotonic calibration expects 1D (same type as trained)
+        # Isotonic calibration expects 1D
         try:
             calibrated_probs = iso_reg.predict(mean_probs)
         except Exception:
-            # Some versions expect shape (n_samples,)
             calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
 
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
