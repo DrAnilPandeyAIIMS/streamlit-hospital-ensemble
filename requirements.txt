@@ -174,3 +174,5 @@ wrapt==1.17.2
 xgboost==2.1.4
 zipp==3.20.2
 zstandard==0.23.0
+gsspread==6.1.2
+oauth2client==4.1.3

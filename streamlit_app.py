@@ -347,15 +347,27 @@ if uploaded_file is not None:
     st.write("Uploaded Data:")
     st.dataframe(input_df)
 
+    # Warn if extra columns are ignored
+    extra_cols = [c for c in input_df.columns if c not in feature_names]
+    if extra_cols:
+        st.warning(f"⚠️ Extra columns ignored: {extra_cols}")
+
     # Add missing columns then reorder
     for col in feature_names:
         if col not in input_df.columns:
             input_df[col] = 0.0
     input_df = input_df[feature_names].fillna(0.0)
 
-    # Scale safely
+    # Scale only numeric features
     try:
-        input_df = scale_dataframe(input_df, scaler, scaler_features)
+        df_scaled = input_df.copy()
+        numeric_to_scale = [
+            col for col in scaler_features 
+            if col in df_scaled.columns and col not in categorical_features
+        ]
+        if numeric_to_scale:
+            df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
+        input_df = df_scaled
     except Exception as e:
         st.error(f"❌ Scaling error: {e}")
         st.stop()
@@ -366,7 +378,6 @@ if uploaded_file is not None:
     all_probs = ensemble_models_predict_all(input_array)
     mean_probs = np.mean(all_probs, axis=0)
     mean_probs = ensure_single_output(mean_probs)
-
     std_devs = np.std(all_probs, axis=0)
     entropy = calculate_entropy(mean_probs)
 
@@ -405,7 +416,7 @@ else:
     st.subheader("📋 Enter Patient Data Manually")
 
     # Define categorical (binary) features
-    categorical_features = {
+    categorical_features = [
         "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
         "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
         "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
@@ -415,15 +426,19 @@ else:
         "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
         "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
         "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
-    }
+    ]
+
+    # Clean feature names loaded from pickle
+    feature_names = [f.strip() for f in feature_names]
 
     with st.form("manual_form"):
         manual_data = {}
         for feature in feature_names:
-            if feature in categorical_features:
-                manual_data[feature] = st.selectbox(f"{feature}", ["No", "Yes"], index=0)
+            f_clean = feature.strip()
+            if f_clean in categorical_features:
+                manual_data[f_clean] = st.selectbox(f"{f_clean}", ["No", "Yes"], index=0)
             else:
-                manual_data[feature] = st.number_input(f"{feature}", step=0.1, value=0.0)
+                manual_data[f_clean] = st.number_input(f"{f_clean}", step=0.1, value=0.0)
 
         submitted = st.form_submit_button("Predict")
 
@@ -435,18 +450,29 @@ else:
                 if col in df_input.columns:
                     df_input[col] = df_input[col].map({"Yes": 1, "No": 0}).fillna(0)
 
-            # Reorder columns
-            df_input = df_input[feature_names].fillna(0.0)
-
-            # Scale numeric features
+            # Scale only numeric features (scaler_features from training)
             try:
-                df_input = scale_dataframe(df_input, scaler, scaler_features)
+                # Keep a copy
+                df_scaled = df_input.copy()
+
+                # Scale only intersection of numeric + scaler_features
+                numeric_to_scale = [
+                    col for col in scaler_features 
+                    if col in df_scaled.columns and col not in categorical_features
+                ]
+
+                if numeric_to_scale:
+                    df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
+
+                df_input = df_scaled
+
             except Exception as e:
                 st.error(f"❌ Scaling error: {e}")
                 st.stop()
 
-
+            # Convert to numpy array for prediction
             input_array = df_input.values
+
 
             # Predict ensemble
             all_probs = ensemble_models_predict_all(input_array)
