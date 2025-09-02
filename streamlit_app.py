@@ -216,15 +216,19 @@ def download_from_gdrive(file_id, output_path):
                 st.stop()
 
 @st.cache_resource
-def load_model_from_drive(model_key, custom_objects=None):
+def load_model_from_drive(model_key: str, use_custom_objects: bool = False):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
+    if use_custom_objects:
+        return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
+    return tf.keras.models.load_model(info["path"])
 
 vae_model = load_model_from_drive("vae_model")
-model_2 = load_model_from_drive("model_2_probabilistic", custom_objects=custom_objects)
-bayesian_model = load_model_from_drive("bayesian_model", custom_objects=custom_objects)
+model_2 = load_model_from_drive("model_2_probabilistic", use_custom_objects=True)
+bayesian_model = load_model_from_drive("bayesian_model", use_custom_objects=True)
+
 ensemble_models = [vae_model, model_2, bayesian_model]
+
 
 # -----------------------------
 # Ensemble prediction function
