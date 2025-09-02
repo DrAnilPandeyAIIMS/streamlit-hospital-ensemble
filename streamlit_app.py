@@ -224,17 +224,21 @@ def load_model_from_drive(model_key):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
     
-    custom_objects = {
-        "CustomDenseVariational": CustomDenseVariational,
-        "negative_log_likelihood": negative_log_likelihood_bernoulli,
-        "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
-        "prior": prior,
-        "posterior": posterior,
-        "DenseFlipoutLayer": DenseFlipoutLayer,
-        "DenseFlipout": tfp.layers.DenseFlipout,
-        "DistributionLambda": tfp.layers.DistributionLambda,
-    }
-    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
+    # Always pass the full custom_objects dictionary
+    return tf.keras.models.load_model(
+        info["path"],
+        custom_objects={
+            "CustomDenseVariational": CustomDenseVariational,
+            "negative_log_likelihood": negative_log_likelihood_bernoulli,
+            "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
+            "prior": prior,
+            "posterior": posterior,
+            "DenseFlipoutLayer": DenseFlipoutLayer,
+            "DenseFlipout": tfp.layers.DenseFlipout,
+            "DistributionLambda": tfp.layers.DistributionLambda,
+        },
+    )
+
 # Load all models
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
