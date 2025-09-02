@@ -217,16 +217,24 @@ def download_from_gdrive(file_id, output_path):
 
 # ✅ Cache model loading, ignore unhashable args
 # ✅ Cache and include custom objects for model loading
+import tensorflow as tf
+import tensorflow_probability as tfp
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    return tf.keras.models.load_model(
-        info["path"],
-        custom_objects=custom_objects,
-        compile=False   # ✅ Avoids optimizer/loss deserialization errors
-    )
-
+    
+    custom_objects = {
+        "CustomDenseVariational": CustomDenseVariational,
+        "negative_log_likelihood": negative_log_likelihood_bernoulli,
+        "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
+        "prior": prior,
+        "posterior": posterior,
+        "DenseFlipoutLayer": DenseFlipoutLayer,
+        "DenseFlipout": tfp.layers.DenseFlipout,
+        "DistributionLambda": tfp.layers.DistributionLambda,
+    }
+    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
 # Load all models
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
