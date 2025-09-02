@@ -219,7 +219,7 @@ def download_from_gdrive(file_id, output_path):
 def load_model_from_drive(model_key, custom_objects=None):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)@st.cache_resource
+    return tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
 
 
 vae_model = load_model_from_drive("vae_model")
