@@ -305,6 +305,11 @@ def scale_dataframe(df: pd.DataFrame, scaler, cols_to_scale=None) -> pd.DataFram
 # -----------------------------
 # Google Sheets helper
 # -----------------------------
+info = st.secrets["gcp_service_account"]
+
+# Google Sheets config (from secrets.toml)
+sheet_key = st.secrets["gsheets"]["gsheet_key"]
+worksheet_name = st.secrets["gsheets"].get("gsheet_worksheet", "predictions")
 def get_gs_client_from_secrets():
     info = st.secrets.get("gcp_service_account")
     if not info:
@@ -316,37 +321,52 @@ def get_gs_client_from_secrets():
     except Exception as e:
         return None, str(e)
 
-def append_to_gsheet(row_dict):
+def append_to_gsheet(df):
+    """
+    Appends all rows of a DataFrame to Google Sheets.
+    """
     client, err = get_gs_client_from_secrets()
     if client is None:
         return False, f"Google Sheets client error: {err}"
 
     sheet_key = st.secrets.get("gsheet_key")
     worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+
     if not sheet_key:
         return False, "No gsheet_key in st.secrets"
 
+    # If user accidentally pasted full URL, extract the key
+    if "docs.google.com" in sheet_key:
+        try:
+            sheet_key = sheet_key.split("/d/")[1].split("/")[0]
+        except Exception:
+            return False, "Invalid gsheet_key format. Must be the spreadsheet ID."
+
     try:
         sh = client.open_by_key(sheet_key)
+
         try:
             ws = sh.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols=str(len(row_dict) + 10))
-            # write header
-            ws.append_row(list(row_dict.keys()))
-        # Ensure header -> get header row
+            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols=str(len(df.columns) + 10))
+            # Write header
+            ws.append_row(list(df.columns))
+
+        # Ensure header consistency
         header = ws.row_values(1)
-        # Build row in header order (if header exists)
-        if header:
-            row = [row_dict.get(h, "") for h in header]
-        else:
-            header = list(row_dict.keys())
+        if not header:
+            header = list(df.columns)
             ws.append_row(header)
-            row = [row_dict.get(h, "") for h in header]
-        ws.append_row(row)
+
+        # Append all rows from DataFrame
+        for _, row in df.iterrows():
+            row_data = [row.get(h, "") for h in header]
+            ws.append_row(row_data)
+
         return True, None
     except Exception as e:
         return False, str(e)
+
 
 # -----------------------------
 # UI — File upload path
@@ -416,13 +436,24 @@ if uploaded_file is not None:
     st.subheader("Prediction Results")
     st.dataframe(results_df)
 
+    # ========================================
+    # Save results to Google Sheets (all rows)
+    # ========================================
+    success, err = append_to_gsheet(results_df)
+    if success:
+        st.success("✅ Results saved to Google Sheets")
+    else:
+        st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+
+    # ========================================
+    # Allow download as CSV
+    # ========================================
     st.download_button(
-        "Download Results as CSV",
+        "📥 Download Results as CSV",
         results_df.to_csv(index=False),
         "predictions.csv",
         "text/csv",
     )
-
 # -----------------------------
 # UI — Manual entry path
 # -----------------------------
