@@ -1,9 +1,10 @@
-# streamlit_app.py
+# streamlit_app.py`
 import os
 import time
 import json
 import warnings
 import sys
+import warnings
 sys.path.append(".")
 import numpy as np
 import pandas as pd
@@ -25,7 +26,7 @@ from custom_layers import (
 )
 
 warnings.filterwarnings("ignore")
-
+`
 # -----------------------------
 # Streamlit page configuration
 # -----------------------------
@@ -188,6 +189,8 @@ custom_objects = {
     "posterior": posterior,
     "DenseFlipoutLayer": DenseFlipoutLayer,
     "DenseFlipout": tfp.layers.DenseFlipout,
+    "DistributionLambda": tfp.layers.DistributionLambda,
+    "build_probabilistic_model": build_probabilistic_model,
 }
 
 # -----------------------------
@@ -223,21 +226,16 @@ import tensorflow_probability as tfp
 def load_model_from_drive(model_key):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    
-    # Always pass the full custom_objects dictionary
-    return tf.keras.models.load_model(
-        info["path"],
-        custom_objects={
-            "CustomDenseVariational": CustomDenseVariational,
-            "negative_log_likelihood": negative_log_likelihood_bernoulli,
-            "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
-            "prior": prior,
-            "posterior": posterior,
-            "DenseFlipoutLayer": DenseFlipoutLayer,
-            "DenseFlipout": tfp.layers.DenseFlipout,
-            "DistributionLambda": tfp.layers.DistributionLambda,
-        },
-    )
+    try:
+        return tf.keras.models.load_model(
+            info["path"],
+            custom_objects=custom_objects,
+        )
+    except Exception as e:
+        st.error(f"❌ Error loading model {model_key}: {str(e)}")
+        import traceback
+        st.text(traceback.format_exc())
+        raise
 
 # Load all models
 vae_model = load_model_from_drive("vae_model")
