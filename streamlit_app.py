@@ -360,12 +360,13 @@ def append_to_gsheet(df):
 
         # Append all rows from DataFrame
         for _, row in df.iterrows():
-            row_data = [row.get(h, "") for h in header]
+            row_data = [str(row[h]) if h in row else "" for h in header]
             ws.append_row(row_data)
 
         return True, None
     except Exception as e:
         return False, str(e)
+
 
 
 # -----------------------------
@@ -436,12 +437,21 @@ if uploaded_file is not None:
     st.subheader("Prediction Results")
     st.dataframe(results_df)
 
-    # ========================================
+     # ========================================
     # Save results to Google Sheets (all rows)
     # ========================================
     success, err = append_to_gsheet(results_df)
     if success:
         st.success("✅ Results saved to Google Sheets")
+
+        # 🔎 Verification: Show last 5 rows from Google Sheets
+        latest_rows, err2 = read_from_gsheet(n=5)
+        if latest_rows:
+            st.info("📖 Last 5 rows in Google Sheets:")
+            st.dataframe(pd.DataFrame(latest_rows))
+        else:
+            st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
+
     else:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
 
@@ -555,8 +565,18 @@ else:
                 "timestamp": pd.Timestamp.now().isoformat()
             })
 
-            ok, err = append_to_gsheet(row_to_save)
+            ok, err = append_to_gsheet(pd.DataFrame([row_to_save]))
             if ok:
                 st.success("✅ Saved prediction to Google Sheets.")
+
+                # 🔎 Verification: Show last 5 rows
+                latest_rows, err2 = read_from_gsheet(n=5)
+                if latest_rows:
+                    st.info("📖 Last 5 rows in Google Sheets:")
+                    st.dataframe(pd.DataFrame(latest_rows))
+                else:
+                    st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
+
             else:
                 st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+
