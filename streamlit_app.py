@@ -26,7 +26,6 @@ from custom_layers import (
 )
 
 warnings.filterwarnings("ignore")
-`
 # -----------------------------
 # Streamlit page configuration
 # -----------------------------
