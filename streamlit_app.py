@@ -307,8 +307,8 @@ def scale_dataframe(df: pd.DataFrame, scaler, cols_to_scale=None) -> pd.DataFram
 info = st.secrets["gcp_service_account"]
 
 # Google Sheets config (from secrets.toml)
-sheet_key = st.secrets["gsheets"]["gsheet_key"]
-worksheet_name = st.secrets["gsheets"].get("gsheet_worksheet", "predictions")
+sheet_key = st.secrets["gsheet_key"]
+worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
 
 def get_gs_client_from_secrets():
     info = st.secrets.get("gcp_service_account")
