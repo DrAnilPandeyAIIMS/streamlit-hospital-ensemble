@@ -18,17 +18,14 @@ from sklearn.isotonic import IsotonicRegression
 # Google Sheets
 import gspread
 from google.oauth2.service_account import Credentials
+import pandas as pd
+import streamlit as st
+from datetime import datetime
 
-from custom_layers import (
-    DenseFlipoutLayer,
-    negative_log_likelihood_bernoulli,
-    build_probabilistic_model,
-)
-import gspread
-from google.oauth2.service_account import Credentials
-
+# --------------------------
+# Google Sheets Connection
+# --------------------------
 def get_gs_client_from_secrets():
-    """Get Google Sheets client from Streamlit secrets"""
     info = st.secrets.get("gcp_service_account")
     if not info:
         return None, "No gcp_service_account found in st.secrets"
@@ -43,10 +40,10 @@ def get_gs_client_from_secrets():
         return None, str(e)
 
 
-def append_to_gsheet(df):
-    """
-    Appends all rows of a DataFrame to Google Sheets.
-    """
+# --------------------------
+# Write Predictions
+# --------------------------
+def write_prediction(raw_prob, calibrated_prob, predicted_label, uncertainty):
     client, err = get_gs_client_from_secrets()
     if client is None:
         return False, f"Google Sheets client error: {err}"
@@ -57,42 +54,32 @@ def append_to_gsheet(df):
     if not sheet_key:
         return False, "No gsheet_key in st.secrets"
 
-    # If user pasted full URL, extract only the key
-    if "docs.google.com" in sheet_key:
-        try:
-            sheet_key = sheet_key.split("/d/")[1].split("/")[0]
-        except Exception:
-            return False, "Invalid gsheet_key format. Must be the spreadsheet ID."
-
     try:
         sh = client.open_by_key(sheet_key)
         try:
             ws = sh.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols=str(len(df.columns) + 10))
-            # Write header
-            ws.append_row(list(df.columns))
+            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols="10")
+            ws.append_row(["Timestamp", "Raw Probability", "Calibrated Probability", "Predicted Label", "Uncertainty"])
 
-        # Ensure header consistency
-        header = ws.row_values(1)
-        if not header:
-            header = list(df.columns)
-            ws.append_row(header)
-
-        # Append all rows from DataFrame
-        for _, row in df.iterrows():
-            row_data = [str(row[h]) if h in row else "" for h in header]
-            ws.append_row(row_data)
+        # Append a single row
+        ws.append_row([
+            str(datetime.now()),
+            round(raw_prob, 3),
+            round(calibrated_prob, 3),
+            predicted_label,
+            round(uncertainty, 3)
+        ])
 
         return True, None
     except Exception as e:
         return False, str(e)
 
 
+# --------------------------
+# Read Last N Predictions
+# --------------------------
 def read_from_gsheet(n=5):
-    """
-    Reads last n rows from Google Sheet.
-    """
     client, err = get_gs_client_from_secrets()
     if client is None:
         return None, f"Google Sheets client error: {err}"
@@ -108,10 +95,16 @@ def read_from_gsheet(n=5):
         ws = sh.worksheet(worksheet_name)
 
         all_values = ws.get_all_values()
-        latest_rows = all_values[-n:] if len(all_values) >= n else all_values
-        return latest_rows, None
+        if not all_values:
+            return [], None
+
+        # Convert to dataframe for nicer display
+        df = pd.DataFrame(all_values[1:], columns=all_values[0])  # first row = header
+        latest = df.tail(n)
+        return latest, None
     except Exception as e:
         return None, str(e)
+
 
 warnings.filterwarnings("ignore")
 # -----------------------------
