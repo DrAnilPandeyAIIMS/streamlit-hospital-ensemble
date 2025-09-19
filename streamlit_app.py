@@ -260,6 +260,12 @@ class CustomDenseVariational(tfp.layers.DenseVariational):
         config["make_prior_fn"] = prior
         config["make_posterior_fn"] = posterior
         return cls(**config)
+# Negative log likelihood for Bernoulli outputs
+def negative_log_likelihood_bernoulli(y_true, y_pred):
+    return -tf.reduce_mean(
+        y_true * tf.math.log(y_pred + 1e-9) +
+        (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
+    )
 
 custom_objects = {
     "CustomDenseVariational": CustomDenseVariational,
