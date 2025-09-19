@@ -261,21 +261,27 @@ class CustomDenseVariational(tfp.layers.DenseVariational):
         config["make_posterior_fn"] = posterior
         return cls(**config)
 # Negative log likelihood for Bernoulli outputs
+import tensorflow as tf
+import tensorflow_probability as tfp
+
+# Negative log likelihood for Bernoulli outputs
 def negative_log_likelihood_bernoulli(y_true, y_pred):
     return -tf.reduce_mean(
         y_true * tf.math.log(y_pred + 1e-9) +
         (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
     )
+
+# Register all custom objects so models can be loaded
 custom_objects = {
     "CustomDenseVariational": CustomDenseVariational,
-    "negative_log_likelihood": negative_log_likelihood_bernoulli,
-    "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
-    "prior": prior,
-    "posterior": posterior,
     "DenseFlipoutLayer": DenseFlipoutLayer,
     "DenseFlipout": tfp.layers.DenseFlipout,
     "DistributionLambda": tfp.layers.DistributionLambda,
+    "negative_log_likelihood": negative_log_likelihood_bernoulli,
+    "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
     "build_probabilistic_model": build_probabilistic_model,
+    "prior": prior,
+    "posterior": posterior,
 }
 
 # -----------------------------
