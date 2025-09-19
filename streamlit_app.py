@@ -264,25 +264,38 @@ class CustomDenseVariational(tfp.layers.DenseVariational):
 import tensorflow as tf
 import tensorflow_probability as tfp
 
-# Negative log likelihood for Bernoulli outputs
+# ✅ Bernoulli NLL (binary classification probabilistic output)
 def negative_log_likelihood_bernoulli(y_true, y_pred):
     return -tf.reduce_mean(
         y_true * tf.math.log(y_pred + 1e-9) +
         (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
     )
 
-# Register all custom objects so models can be loaded
+# ✅ Generic NLL for distributions (used with tfp.layers.DistributionLambda)
+def negative_log_likelihood(y_true, y_pred_dist):
+    """
+    y_pred_dist is a Distribution object (e.g., Bernoulli, Normal, etc.)
+    This computes the mean negative log-likelihood.
+    """
+    return -y_pred_dist.log_prob(y_true)
+
+# Your probabilistic layers
+DenseFlipoutLayer = tfp.layers.DenseFlipout
+
+# ✅ Register all custom objects so model loading works
 custom_objects = {
     "CustomDenseVariational": CustomDenseVariational,
     "DenseFlipoutLayer": DenseFlipoutLayer,
     "DenseFlipout": tfp.layers.DenseFlipout,
     "DistributionLambda": tfp.layers.DistributionLambda,
-    "negative_log_likelihood": negative_log_likelihood_bernoulli,
-    "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
     "build_probabilistic_model": build_probabilistic_model,
+    "negative_log_likelihood": negative_log_likelihood,
+    "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
     "prior": prior,
     "posterior": posterior,
 }
+
+
 
 # -----------------------------
 # Google Drive model mapping & loader
