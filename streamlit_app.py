@@ -266,7 +266,6 @@ def negative_log_likelihood_bernoulli(y_true, y_pred):
         y_true * tf.math.log(y_pred + 1e-9) +
         (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
     )
-
 custom_objects = {
     "CustomDenseVariational": CustomDenseVariational,
     "negative_log_likelihood": negative_log_likelihood_bernoulli,
