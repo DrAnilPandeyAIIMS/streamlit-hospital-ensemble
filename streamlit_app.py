@@ -265,6 +265,9 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 # ✅ Bernoulli NLL (binary classification probabilistic output)
+# Placeholder for build_probabilistic_model since it's only needed during training
+def build_probabilistic_model(*args, **kwargs):
+    raise NotImplementedError("build_probabilistic_model is not available in inference mode.")
 def negative_log_likelihood_bernoulli(y_true, y_pred):
     return -tf.reduce_mean(
         y_true * tf.math.log(y_pred + 1e-9) +
