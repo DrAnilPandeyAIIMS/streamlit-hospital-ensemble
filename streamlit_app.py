@@ -297,10 +297,32 @@ custom_objects = {
 # -----------------------------
 # Model definitions
 # -----------------------------
+import os
+import streamlit as st
+import tensorflow as tf
+import tensorflow_probability as tfp
+import threading
+import gdown
+
+# -----------------------------
+# Model files (Google Drive IDs + local paths)
+# -----------------------------
+# -----------------------------
+# Google Drive Model Mapping
+# -----------------------------
 MODEL_FILES = {
-    "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model"},
-    "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic_tf"},
-    "bayesian_model": {"id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp", "path": "models/bayesian_model"},
+    "vae_model": {
+        "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
+        "path": "models/vae_model"
+    },
+    "model_2_probabilistic": {
+        "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
+        "path": "models/model_2_probabilistic_tf"
+    },
+    "bayesian_model": {
+        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
+        "path": "models/bayesian_model"
+    },
 }
 
 # -----------------------------
@@ -312,17 +334,20 @@ def _ensure_models_dir(path: str):
         os.makedirs(d, exist_ok=True)
 
 # -----------------------------
-# Download from Google Drive
+# Download model if missing
 # -----------------------------
 def download_model_if_needed(model_key):
     info = MODEL_FILES[model_key]
     _ensure_models_dir(info["path"])
-    
-    if not os.path.exists(info["path"]):
+
+    # Check both SavedModel dir & .h5 file
+    if not os.path.exists(info["path"]) and not os.path.exists(info["path"] + ".h5"):
         url = f"https://drive.google.com/uc?id={info['id']}"
-        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
-            import gdown
+        try:
             gdown.download(url, info["path"], quiet=False)
+        except Exception as e:
+            st.error(f"❌ Download failed for {model_key}: {e}")
+            st.stop()
     return info["path"]
 
 # -----------------------------
@@ -331,30 +356,42 @@ def download_model_if_needed(model_key):
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
     path = download_model_if_needed(model_key)
-    
-    if os.path.isdir(path) or os.path.isfile(path + ".h5"):
-        try:
-            model = tf.keras.models.load_model(path, custom_objects=custom_objects)
-            return model
-        except Exception as e:
-            st.error(f"❌ Error loading model {model_key}: {e}")
-            import traceback
-            st.text(traceback.format_exc())
-            st.stop()
+
+    # Case 1: TensorFlow SavedModel directory
+    if os.path.isdir(path):
+        return tf.keras.models.load_model(path, custom_objects=custom_objects)
+
+    # Case 2: HDF5 fallback
+    elif os.path.isfile(path + ".h5"):
+        return tf.keras.models.load_model(path + ".h5", custom_objects=custom_objects)
+
     else:
-        st.error(f"❌ Model file not found for {model_key}")
+        st.error(f"❌ Model not found for {model_key}")
         st.stop()
 
 # -----------------------------
-# Load all models (optional: can use buttons for lazy loading)
+# Background Preloading
+# -----------------------------
+def preload_models():
+    for key in MODEL_FILES.keys():
+        try:
+            load_model_from_drive(key)
+            print(f"✅ Preloaded {key}")
+        except Exception as e:
+            print(f"⚠️ Could not preload {key}: {e}")
+
+# Run in background (so surgeon doesn’t wait)
+import threading
+threading.Thread(target=preload_models, daemon=True).start()
+
+# -----------------------------
+# Get ensemble (cached models)
 # -----------------------------
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
 bayesian_model = load_model_from_drive("bayesian_model")
 
 ensemble_models = [vae_model, model_2, bayesian_model]
-
-
 
 # -----------------------------
 # Ensemble prediction function
