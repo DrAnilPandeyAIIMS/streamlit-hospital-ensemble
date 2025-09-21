@@ -231,35 +231,7 @@ def posterior(kernel_size, bias_size, dtype=None):
 # -----------------------------
 # Custom classes (for loading models)
 # -----------------------------
-class CustomDenseVariational(tfp.layers.DenseVariational):
-    def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
-        super().__init__(
-            units=units,
-            make_prior_fn=make_prior_fn,
-            make_posterior_fn=make_posterior_fn,
-            kl_weight=kl_weight,
-            **kwargs,
-        )
-        self.units = units
-        self.make_prior_fn = make_prior_fn
-        self.make_posterior_fn = make_posterior_fn
-        self.kl_weight = kl_weight
 
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            "units": self.units,
-            "make_prior_fn": "prior",
-            "make_posterior_fn": "posterior",
-            "kl_weight": self.kl_weight,
-        })
-        return config
-
-    @classmethod
-    def from_config(cls, config):
-        config["make_prior_fn"] = prior
-        config["make_posterior_fn"] = posterior
-        return cls(**config)
 # Negative log likelihood for Bernoulli outputs
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -296,10 +268,7 @@ custom_objects = {
     "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
     "prior": prior,
     "posterior": posterior,
-    "kernel_posterior_fn": tfp.layers.default_mean_field_normal_fn(),
-    "kernel_prior_fn": tfp.layers.default_multivariate_normal_fn,
-    "bias_posterior_fn": tfp.layers.default_mean_field_normal_fn(is_singular=True),
-    "bias_prior_fn": tfp.layers.default_multivariate_normal_fn,
+    
 }
 
 
@@ -307,10 +276,13 @@ custom_objects = {
 # -----------------------------
 # Google Drive model mapping & loader
 # -----------------------------
+# -----------------------------
+# Google Drive model mapping & loader (UPDATED FOR TFP FLIPOUT & SAVEDMODEL)
+# -----------------------------
 MODEL_FILES = {
-    "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model.h5"},
-    "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic.h5"},
-    "bayesian_model": {"id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp", "path": "models/bayesian_model.h5"},
+    "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model"},
+    "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic_tf"},
+    "bayesian_model": {"id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp", "path": "models/bayesian_model"},
 }
 
 def _ensure_models_dir(path: str):
@@ -329,26 +301,47 @@ def download_from_gdrive(file_id, output_path):
                 st.error(f"❌ Download failed for {output_path}. Error: {e}")
                 st.stop()
 
-# ✅ Cache model loading, ignore unhashable args
-# ✅ Cache and include custom objects for model loading
-import tensorflow as tf
-import tensorflow_probability as tfp
+# -----------------------------
+# Streamlit cache-friendly model loader with TFP support (ADDITION)
+# -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
-    try:
-        return tf.keras.models.load_model(
-            info["path"],
-            custom_objects=custom_objects,
-        )
-    except Exception as e:
-        st.error(f"❌ Error loading model {model_key}: {str(e)}")
-        import traceback
-        st.text(traceback.format_exc())
-        raise
 
-# Load all models
+    # Check if it's a SavedModel directory (TFP friendly)
+    if os.path.isdir(info["path"]):
+        try:
+            model = tf.keras.models.load_model(
+                info["path"],
+                custom_objects=custom_objects
+            )
+            return model
+        except Exception as e:
+            st.error(f"❌ Error loading SavedModel {model_key}: {str(e)}")
+            import traceback
+            st.text(traceback.format_exc())
+            raise
+    # Fallback: try HDF5 file
+    elif os.path.isfile(info["path"] + ".h5"):
+        try:
+            model = tf.keras.models.load_model(
+                info["path"] + ".h5",
+                custom_objects=custom_objects
+            )
+            return model
+        except Exception as e:
+            st.error(f"❌ Error loading HDF5 {model_key}: {str(e)}")
+            import traceback
+            st.text(traceback.format_exc())
+            raise
+    else:
+        st.error(f"❌ Model file not found for {model_key}")
+        st.stop()
+
+# -----------------------------
+# Load all models (ADDITION)
+# -----------------------------
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
 bayesian_model = load_model_from_drive("bayesian_model")
