@@ -310,6 +310,15 @@ import gdown
 # -----------------------------
 # Google Drive Model Mapping
 # -----------------------------
+import threading
+import tensorflow as tf
+import streamlit as st
+import os
+import gdown
+
+# -----------------------------
+# Model files (Google Drive IDs + local paths)
+# -----------------------------
 MODEL_FILES = {
     "vae_model": {
         "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
@@ -326,7 +335,7 @@ MODEL_FILES = {
 }
 
 # -----------------------------
-# Ensure directory exists
+# Ensure local directory exists
 # -----------------------------
 def _ensure_models_dir(path: str):
     d = os.path.dirname(path)
@@ -334,64 +343,75 @@ def _ensure_models_dir(path: str):
         os.makedirs(d, exist_ok=True)
 
 # -----------------------------
-# Download model if missing
+# Download from Google Drive if not present
 # -----------------------------
 def download_model_if_needed(model_key):
     info = MODEL_FILES[model_key]
     _ensure_models_dir(info["path"])
-
-    # Check both SavedModel dir & .h5 file
     if not os.path.exists(info["path"]) and not os.path.exists(info["path"] + ".h5"):
         url = f"https://drive.google.com/uc?id={info['id']}"
-        try:
+        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
             gdown.download(url, info["path"], quiet=False)
-        except Exception as e:
-            st.error(f"❌ Download failed for {model_key}: {e}")
-            st.stop()
     return info["path"]
 
 # -----------------------------
-# Streamlit cached loader
+# Cache-friendly loader
 # -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
     path = download_model_if_needed(model_key)
 
-    # Case 1: TensorFlow SavedModel directory
+    # SavedModel directory
     if os.path.isdir(path):
         return tf.keras.models.load_model(path, custom_objects=custom_objects)
-
-    # Case 2: HDF5 fallback
+    # HDF5 fallback
     elif os.path.isfile(path + ".h5"):
         return tf.keras.models.load_model(path + ".h5", custom_objects=custom_objects)
-
     else:
-        st.error(f"❌ Model not found for {model_key}")
+        st.error(f"❌ Model file not found for {model_key}")
         st.stop()
 
 # -----------------------------
-# Background Preloading
+# Thread-safe preload dictionary
 # -----------------------------
-def preload_models():
+_loaded_models = {}
+_loaded_lock = threading.Lock()
+
+def get_model(model_key):
+    """
+    Safe access to models. Guarantees the model is loaded.
+    """
+    with _loaded_lock:
+        if model_key not in _loaded_models:
+            _loaded_models[model_key] = load_model_from_drive(model_key)
+    return _loaded_models[model_key]
+
+# -----------------------------
+# Background preloading (non-blocking)
+# -----------------------------
+def preload_all_models():
     for key in MODEL_FILES.keys():
         try:
-            load_model_from_drive(key)
+            get_model(key)
             print(f"✅ Preloaded {key}")
         except Exception as e:
             print(f"⚠️ Could not preload {key}: {e}")
 
-# Run in background (so surgeon doesn’t wait)
-import threading
-threading.Thread(target=preload_models, daemon=True).start()
+threading.Thread(target=preload_all_models, daemon=True).start()
+
 
 # -----------------------------
 # Get ensemble (cached models)
 # -----------------------------
-vae_model = load_model_from_drive("vae_model")
-model_2 = load_model_from_drive("model_2_probabilistic")
-bayesian_model = load_model_from_drive("bayesian_model")
+# -----------------------------
+# Get ensemble (cached models)
+# -----------------------------
+vae_model = get_model("vae_model")
+model_2 = get_model("model_2_probabilistic")
+bayesian_model = get_model("bayesian_model")
 
 ensemble_models = [vae_model, model_2, bayesian_model]
+
 
 # -----------------------------
 # Ensemble prediction function
