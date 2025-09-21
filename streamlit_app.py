@@ -231,6 +231,19 @@ def posterior(kernel_size, bias_size, dtype=None):
 # -----------------------------
 # Custom classes (for loading models)
 # -----------------------------
+# Minimal stub to allow loading
+class CustomDenseVariational(tfp.layers.DenseVariational):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    @classmethod
+    def from_config(cls, config):
+        # Handle legacy keys
+        config.setdefault("kernel_prior_fn", prior)
+        config.setdefault("kernel_posterior_fn", posterior)
+        config.setdefault("bias_prior_fn", prior)
+        config.setdefault("bias_posterior_fn", posterior)
+        return cls(**config)
 
 # Negative log likelihood for Bernoulli outputs
 import tensorflow as tf
