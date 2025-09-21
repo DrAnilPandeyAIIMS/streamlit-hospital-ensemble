@@ -233,17 +233,36 @@ def posterior(kernel_size, bias_size, dtype=None):
 # -----------------------------
 # Minimal stub to allow loading
 class CustomDenseVariational(tfp.layers.DenseVariational):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
+        super().__init__(
+            units=units,
+            make_prior_fn=make_prior_fn,
+            make_posterior_fn=make_posterior_fn,
+            kl_weight=kl_weight,
+            **kwargs
+        )
+        self.units = units
+        self.kl_weight = kl_weight
+
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            "units": self.units,
+            "kl_weight": self.kl_weight
+        })
+        return config
 
     @classmethod
     def from_config(cls, config):
-        # Handle legacy keys
-        config.setdefault("kernel_prior_fn", prior)
-        config.setdefault("kernel_posterior_fn", posterior)
-        config.setdefault("bias_prior_fn", prior)
-        config.setdefault("bias_posterior_fn", posterior)
+        # Ensure both old keys from saved model and new keys are set
+        if "posterior_fn" not in config:
+            config["posterior_fn"] = posterior
+        if "prior_fn" not in config:
+            config["prior_fn"] = prior
+        config["make_prior_fn"] = prior
+        config["make_posterior_fn"] = posterior
         return cls(**config)
+
 
 # Negative log likelihood for Bernoulli outputs
 
@@ -266,7 +285,23 @@ def negative_log_likelihood(y_true, y_pred_dist):
     return -y_pred_dist.log_prob(y_true)
 
 # Your probabilistic layers
-DenseFlipoutLayer = tfp.layers.DenseFlipout
+# Your probabilistic DenseFlipout wrapper
+class DenseFlipoutLayer(tf.keras.layers.Layer):
+    def __init__(self, units, activation=None, **kwargs):
+        super().__init__(**kwargs)
+        self.units = units
+        self.activation = activation
+
+    def build(self, input_shape):
+        self.dense_flipout = tfp.layers.DenseFlipout(
+            units=self.units, 
+            activation=self.activation
+        )
+        super().build(input_shape)
+
+    def call(self, inputs):
+        return self.dense_flipout(inputs)
+
 
 # ✅ Register all custom objects so model loading works
 custom_objects = {
@@ -297,12 +332,6 @@ custom_objects = {
 # -----------------------------
 # Model definitions
 # -----------------------------
-import os
-import streamlit as st
-import tensorflow as tf
-import tensorflow_probability as tfp
-import threading
-import gdown
 
 # -----------------------------
 # Model files (Google Drive IDs + local paths)
@@ -311,10 +340,7 @@ import gdown
 # Google Drive Model Mapping
 # -----------------------------
 import threading
-import tensorflow as tf
-import streamlit as st
-import os
-import gdown
+
 
 # -----------------------------
 # Model files (Google Drive IDs + local paths)
