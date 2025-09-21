@@ -296,6 +296,10 @@ custom_objects = {
     "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
     "prior": prior,
     "posterior": posterior,
+    "kernel_posterior_fn": tfp.layers.default_mean_field_normal_fn(),
+    "kernel_prior_fn": tfp.layers.default_multivariate_normal_fn,
+    "bias_posterior_fn": tfp.layers.default_mean_field_normal_fn(is_singular=True),
+    "bias_prior_fn": tfp.layers.default_multivariate_normal_fn,
 }
 
 
