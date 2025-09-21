@@ -246,8 +246,6 @@ class CustomDenseVariational(tfp.layers.DenseVariational):
         return cls(**config)
 
 # Negative log likelihood for Bernoulli outputs
-import tensorflow as tf
-import tensorflow_probability as tfp
 
 # ✅ Bernoulli NLL (binary classification probabilistic output)
 # Placeholder for build_probabilistic_model since it's only needed during training
@@ -292,17 +290,26 @@ custom_objects = {
 # -----------------------------
 # Google Drive model mapping & loader (UPDATED FOR TFP FLIPOUT & SAVEDMODEL)
 # -----------------------------
+# -----------------------------
+# Google Drive model info
+# -----------------------------
 MODEL_FILES = {
     "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model"},
     "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic_tf"},
     "bayesian_model": {"id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp", "path": "models/bayesian_model"},
 }
 
+# -----------------------------
+# Ensure directory exists
+# -----------------------------
 def _ensure_models_dir(path: str):
     d = os.path.dirname(path)
     if d and not os.path.exists(d):
         os.makedirs(d, exist_ok=True)
 
+# -----------------------------
+# Download from Google Drive
+# -----------------------------
 def download_from_gdrive(file_id, output_path):
     _ensure_models_dir(output_path)
     if not os.path.exists(output_path):
@@ -315,33 +322,50 @@ def download_from_gdrive(file_id, output_path):
                 st.stop()
 
 # -----------------------------
-# Streamlit cache-friendly model loader with TFP support (ADDITION)
+# Custom objects for TFP layers
+# -----------------------------
+class CustomDenseVariational(tfp.layers.DenseVariational):
+    def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
+        super().__init__(
+            units=units,
+            make_prior_fn=make_prior_fn,
+            make_posterior_fn=make_posterior_fn,
+            kl_weight=kl_weight,
+            **kwargs,
+        )
+
+# Keep your original prior/posterior functions
+# def prior(...): ...
+# def posterior(...): ...
+
+custom_objects = {
+    "CustomDenseVariational": CustomDenseVariational,
+    "prior": prior,
+    "posterior": posterior
+}
+
+# -----------------------------
+# Streamlit cached model loader
 # -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
     info = MODEL_FILES[model_key]
     download_from_gdrive(info["id"], info["path"])
 
-    # Check if it's a SavedModel directory (TFP friendly)
+    # Try SavedModel directory first
     if os.path.isdir(info["path"]):
         try:
-            model = tf.keras.models.load_model(
-                info["path"],
-                custom_objects=custom_objects
-            )
+            model = tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
             return model
         except Exception as e:
             st.error(f"❌ Error loading SavedModel {model_key}: {str(e)}")
             import traceback
             st.text(traceback.format_exc())
             raise
-    # Fallback: try HDF5 file
+    # Fallback: HDF5 file
     elif os.path.isfile(info["path"] + ".h5"):
         try:
-            model = tf.keras.models.load_model(
-                info["path"] + ".h5",
-                custom_objects=custom_objects
-            )
+            model = tf.keras.models.load_model(info["path"] + ".h5", custom_objects=custom_objects)
             return model
         except Exception as e:
             st.error(f"❌ Error loading HDF5 {model_key}: {str(e)}")
@@ -353,12 +377,14 @@ def load_model_from_drive(model_key):
         st.stop()
 
 # -----------------------------
-# Load all models (ADDITION)
+# Load all models
 # -----------------------------
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
 bayesian_model = load_model_from_drive("bayesian_model")
+
 ensemble_models = [vae_model, model_2, bayesian_model]
+
 
 # -----------------------------
 # Ensemble prediction function
