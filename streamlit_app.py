@@ -406,11 +406,71 @@ threading.Thread(target=preload_all_models, daemon=True).start()
 # -----------------------------
 # Get ensemble (cached models)
 # -----------------------------
-vae_model = get_model("vae_model")
-model_2 = get_model("model_2_probabilistic")
-bayesian_model = get_model("bayesian_model")
+# -----------------------------
+# Ensemble safe loader
+# -----------------------------
+import threading
 
-ensemble_models = [vae_model, model_2, bayesian_model]
+# Global variables for models
+vae_model = None
+model_2 = None
+bayesian_model = None
+
+# Helper: load single model safely
+def safe_load_model(model_key):
+    try:
+        model = load_model_from_drive(model_key)
+        if model is None:
+            st.error(f"❌ {model_key} failed to load!")
+        else:
+            st.success(f"✅ {model_key} loaded")
+        return model
+    except Exception as e:
+        st.error(f"❌ Exception while loading {model_key}: {e}")
+        import traceback
+        st.text(traceback.format_exc())
+        return None
+
+# Preload models in background (non-blocking)
+def preload_ensemble_models():
+    global vae_model, model_2, bayesian_model
+    vae_model = safe_load_model("vae_model")
+    model_2 = safe_load_model("model_2_probabilistic")
+    bayesian_model = safe_load_model("bayesian_model")
+
+threading.Thread(target=preload_ensemble_models, daemon=True).start()
+
+# -----------------------------
+# Lazy loading buttons (optional)
+# -----------------------------
+if st.button("Load VAE Model"):
+    vae_model = safe_load_model("vae_model")
+
+if st.button("Load Probabilistic Model"):
+    model_2 = safe_load_model("model_2_probabilistic")
+
+if st.button("Load Bayesian Model"):
+    bayesian_model = safe_load_model("bayesian_model")
+
+# -----------------------------
+# Ensure ensemble ready before prediction
+# -----------------------------
+def get_ensemble_models():
+    global vae_model, model_2, bayesian_model
+    # Load any missing model lazily
+    if vae_model is None:
+        vae_model = safe_load_model("vae_model")
+    if model_2 is None:
+        model_2 = safe_load_model("model_2_probabilistic")
+    if bayesian_model is None:
+        bayesian_model = safe_load_model("bayesian_model")
+    
+    # Return ensemble list
+    return [vae_model, model_2, bayesian_model]
+
+# Use this in prediction
+ensemble_models = get_ensemble_models()
+
 
 
 # -----------------------------
