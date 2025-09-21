@@ -293,6 +293,10 @@ custom_objects = {
 # -----------------------------
 # Google Drive model info
 # -----------------------------
+
+# -----------------------------
+# Model definitions
+# -----------------------------
 MODEL_FILES = {
     "vae_model": {"id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe", "path": "models/vae_model"},
     "model_2_probabilistic": {"id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad", "path": "models/model_2_probabilistic_tf"},
@@ -310,80 +314,46 @@ def _ensure_models_dir(path: str):
 # -----------------------------
 # Download from Google Drive
 # -----------------------------
-def download_from_gdrive(file_id, output_path):
-    _ensure_models_dir(output_path)
-    if not os.path.exists(output_path):
-        url = f"https://drive.google.com/uc?id={file_id}"
-        with st.spinner(f"📥 Downloading {os.path.basename(output_path)} from Google Drive..."):
-            try:
-                gdown.download(url, output_path, quiet=False)
-            except Exception as e:
-                st.error(f"❌ Download failed for {output_path}. Error: {e}")
-                st.stop()
+def download_model_if_needed(model_key):
+    info = MODEL_FILES[model_key]
+    _ensure_models_dir(info["path"])
+    
+    if not os.path.exists(info["path"]):
+        url = f"https://drive.google.com/uc?id={info['id']}"
+        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
+            import gdown
+            gdown.download(url, info["path"], quiet=False)
+    return info["path"]
 
 # -----------------------------
-# Custom objects for TFP layers
-# -----------------------------
-class CustomDenseVariational(tfp.layers.DenseVariational):
-    def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
-        super().__init__(
-            units=units,
-            make_prior_fn=make_prior_fn,
-            make_posterior_fn=make_posterior_fn,
-            kl_weight=kl_weight,
-            **kwargs,
-        )
-
-# Keep your original prior/posterior functions
-# def prior(...): ...
-# def posterior(...): ...
-
-custom_objects = {
-    "CustomDenseVariational": CustomDenseVariational,
-    "prior": prior,
-    "posterior": posterior
-}
-
-# -----------------------------
-# Streamlit cached model loader
+# Streamlit cached loader
 # -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
-    info = MODEL_FILES[model_key]
-    download_from_gdrive(info["id"], info["path"])
-
-    # Try SavedModel directory first
-    if os.path.isdir(info["path"]):
+    path = download_model_if_needed(model_key)
+    
+    if os.path.isdir(path) or os.path.isfile(path + ".h5"):
         try:
-            model = tf.keras.models.load_model(info["path"], custom_objects=custom_objects)
+            model = tf.keras.models.load_model(path, custom_objects=custom_objects)
             return model
         except Exception as e:
-            st.error(f"❌ Error loading SavedModel {model_key}: {str(e)}")
+            st.error(f"❌ Error loading model {model_key}: {e}")
             import traceback
             st.text(traceback.format_exc())
-            raise
-    # Fallback: HDF5 file
-    elif os.path.isfile(info["path"] + ".h5"):
-        try:
-            model = tf.keras.models.load_model(info["path"] + ".h5", custom_objects=custom_objects)
-            return model
-        except Exception as e:
-            st.error(f"❌ Error loading HDF5 {model_key}: {str(e)}")
-            import traceback
-            st.text(traceback.format_exc())
-            raise
+            st.stop()
     else:
         st.error(f"❌ Model file not found for {model_key}")
         st.stop()
 
 # -----------------------------
-# Load all models
+# Load all models (optional: can use buttons for lazy loading)
 # -----------------------------
 vae_model = load_model_from_drive("vae_model")
 model_2 = load_model_from_drive("model_2_probabilistic")
 bayesian_model = load_model_from_drive("bayesian_model")
 
 ensemble_models = [vae_model, model_2, bayesian_model]
+
 
 
 # -----------------------------
