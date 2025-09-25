@@ -582,7 +582,7 @@ def get_gs_client_from_secrets():
 # -----------------------------
 
 # -----------------------------
-# UI — File upload path
+# UI — File upload path (single-column outcome)
 # -----------------------------
 st.header("Ensemble Model Predictor")
 uploaded_file = st.file_uploader("Upload Patient CSV File", type=["csv"])
@@ -622,24 +622,25 @@ if uploaded_file is not None:
         st.error(f"❌ Scaling error: {e}")
         st.stop()
 
+    # Convert to array
     input_array = input_df.values
 
     # Predict ensemble
-    all_probs = ensemble_models_predict_all(input_array)  # ensure correct shape
-    mean_probs = np.mean(all_probs, axis=0)
+    all_probs = ensemble_models_predict_all(input_array)
+    mean_probs = np.mean(all_probs, axis=0)      # 1D
     mean_probs = ensure_single_output(mean_probs)
-    std_devs = np.std(all_probs, axis=0)
-    entropy = calculate_entropy(mean_probs)
+    std_devs = np.std(all_probs, axis=0)         # 1D
+    entropy = calculate_entropy(mean_probs)      # 1D
 
     # Calibrate probabilities
     try:
-        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1))
+        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
     except Exception:
-        calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1))
+        calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
 
     predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-    # Construct results
+    # Construct results DataFrame
     results_df = input_df.copy()
     results_df["raw_probability"] = mean_probs
     results_df["calibrated_probability"] = calibrated_probs
@@ -649,6 +650,8 @@ if uploaded_file is not None:
 
     st.subheader("Prediction Results")
     st.dataframe(results_df)
+
+    # Save to Google Sheets
     ok, err = append_to_gsheet(results_df)
     if ok:
         st.success("✅ Saved prediction to Google Sheets.")
@@ -661,17 +664,6 @@ if uploaded_file is not None:
             st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
     else:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
-# ========================================
-# Save results to Google Sheets (all rows)
-# ========================================
-
-    
-# -----------------------------
-# UI — Manual entry path
-# -----------------------------
-# -----------------------------
-# Streamlit UI – Manual entry path
-# -----------------------------
 
     # Allow download as CSV
     st.download_button(
@@ -680,111 +672,111 @@ if uploaded_file is not None:
         "predictions.csv",
         "text/csv",
     )
-         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
 
+    
     # === Manual entry path ===
-    st.subheader("📋 Enter Patient Data Manually")
-    # (here you’ll add input widgets for patient features)
+    # -----------------------------
+# UI — Manual entry path (single-column outcome)
+# -----------------------------
+st.subheader("📋 Enter Patient Data Manually")
 
-    # Define categorical (binary) features
-    categorical_features = [
-        "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
-        "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
-        "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
-        "Herniotomy", "Lithotomy", "Pyeloplasty", "Appendicectomy", "Omentoplasty",
-        "SmallBowelResection", "Laproscopic LysisOfAdhesions", "MRM",
-        "Hysterectomy", "Prostectomy", "DiagLaprot", "Nephrectomy", "Gastrectomy",
-        "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
-        "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
-        "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
-    ]
+# Define categorical (binary) features
+categorical_features = [
+    "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
+    "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
+    "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
+    "Herniotomy", "Lithotomy", "Pyeloplasty", "Appendicectomy", "Omentoplasty",
+    "SmallBowelResection", "Laproscopic LysisOfAdhesions", "MRM",
+    "Hysterectomy", "Prostectomy", "DiagLaprot", "Nephrectomy", "Gastrectomy",
+    "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
+    "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
+    "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
+]
 
-    # Clean feature names loaded from pickle
-    feature_names = [f.strip() for f in feature_names]
+# Ensure feature names are clean
+feature_names = [f.strip() for f in feature_names]
 
-    with st.form("manual_form"):
+with st.form("manual_form"):
     manual_data = {}
     for feature in feature_names:
-        f_clean = feature.strip()
-        if f_clean in categorical_features:
-            manual_data[f_clean] = st.selectbox(f"{f_clean}", ["No", "Yes"], index=0)
+        if feature in categorical_features:
+            manual_data[feature] = st.selectbox(f"{feature}", ["No", "Yes"], index=0)
         else:
-            manual_data[f_clean] = st.number_input(f"{f_clean}", step=0.1, value=0.0)
+            manual_data[feature] = st.number_input(f"{feature}", step=0.1, value=0.0)
 
     submitted = st.form_submit_button("Predict")
 
-    if submitted:
-        # Convert Yes/No → 1/0
-        raw_input = manual_data.copy()
-        for col in categorical_features:
-            if col in raw_input:
-                raw_input[col] = 1 if raw_input[col] == "Yes" else 0
+if submitted:
+    # Convert Yes/No → 1/0
+    raw_input = manual_data.copy()
+    for col in categorical_features:
+        if col in raw_input:
+            raw_input[col] = 1 if raw_input[col] == "Yes" else 0
 
-        df_input = pd.DataFrame([raw_input])
+    df_input = pd.DataFrame([raw_input])
 
-        # Scale numeric features
-        try:
-            df_scaled = df_input.copy()
-            numeric_to_scale = [
-                col for col in scaler_features 
-                if col in df_scaled.columns and col not in categorical_features
-            ]
-            if numeric_to_scale:
-                df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
-            df_input = df_scaled
-        except Exception as e:
-            st.error(f"❌ Scaling error: {e}")
-            st.stop()
+    # Scale numeric features
+    try:
+        df_scaled = df_input.copy()
+        numeric_to_scale = [
+            col for col in scaler_features
+            if col in df_scaled.columns and col not in categorical_features
+        ]
+        if numeric_to_scale:
+            df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
+        df_input = df_scaled
+    except Exception as e:
+        st.error(f"❌ Scaling error: {e}")
+        st.stop()
 
-        # Predict
-        input_array = df_input.values
-        all_probs = ensemble_models_predict_all(input_array)
-        mean_probs = np.mean(all_probs, axis=0).reshape(-1)   # force 1-D
-        mean_probs = ensure_single_output(mean_probs)
+    # Convert to array
+    input_array = df_input.values
 
-        std_devs = np.std(all_probs, axis=0).reshape(-1)
-        entropy = np.atleast_1d(calculate_entropy(mean_probs))  # ensure array
+    # Predict ensemble
+    all_probs = ensemble_models_predict_all(input_array)
+    mean_probs = np.mean(all_probs, axis=0).reshape(-1)   # 1D
+    mean_probs = ensure_single_output(mean_probs)
+    std_devs = np.std(all_probs, axis=0).reshape(-1)
+    entropy = np.atleast_1d(calculate_entropy(mean_probs))  # ensure array
 
-        try:
-            calibrated_probs = iso_reg.predict(mean_probs)
-        except Exception:
-            calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
+    # Calibrate probabilities
+    try:
+        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+    except Exception:
+        calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
 
-        predicted_labels = (calibrated_probs >= best_threshold).astype(int)
+    predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # Display
-        st.subheader("Prediction Result")
-        st.write(f"**Raw Probability:** {mean_probs[0]:.3f}")
-        st.write(f"**Calibrated Probability:** {calibrated_probs[0]:.3f}")
-        st.write(f"**Predicted Label:** {'High Risk' if predicted_labels[0] == 1 else 'Low Risk'}")
-        st.write(f"**Uncertainty (Std Dev):** {std_devs[0]:.3f}")
-        st.write(f"**Entropy:** {entropy[0]:.3f}")
+    # Display results
+    st.subheader("Prediction Result")
+    st.write(f"**Raw Probability:** {mean_probs[0]:.3f}")
+    st.write(f"**Calibrated Probability:** {calibrated_probs[0]:.3f}")
+    st.write(f"**Predicted Label:** {'High Risk' if predicted_labels[0] == 1 else 'Low Risk'}")
+    st.write(f"**Uncertainty (Std Dev):** {std_devs[0]:.3f}")
+    st.write(f"**Entropy:** {entropy[0]:.3f}")
 
-        # Save to Google Sheet (store raw input, not scaled)
-        row_to_save = raw_input.copy()
-        row_to_save.update({
-            "raw_probability": float(mean_probs[0]),
-            "calibrated_probability": float(calibrated_probs[0]),
-            "predicted_label": int(predicted_labels[0]),
-            "std_deviation": float(std_devs[0]),
-            "entropy": float(entropy[0]),
-            "timestamp": pd.Timestamp.now().isoformat()
-        })
+    # Save raw input + prediction to Google Sheets
+    row_to_save = raw_input.copy()
+    row_to_save.update({
+        "raw_probability": float(mean_probs[0]),
+        "calibrated_probability": float(calibrated_probs[0]),
+        "predicted_label": int(predicted_labels[0]),
+        "std_deviation": float(std_devs[0]),
+        "entropy": float(entropy[0]),
+        "timestamp": pd.Timestamp.now().isoformat()
+    })
 
+    row_df = pd.DataFrame([row_to_save])
+    ok, err = append_to_gsheet(row_df)
+    if ok:
+        st.success("✅ Saved prediction to Google Sheets.")
 
-            row_df = pd.DataFrame([row_to_save])
-            ok, err = append_to_gsheet(row_df)
-            if ok:
-                st.success("✅ Saved prediction to Google Sheets.")
-
-                # 🔎 Verification: Show last 5 rows
-                latest_rows, err2 = read_from_gsheet(n=5)
-                if latest_rows:
-                    st.info("📖 Last 5 rows in Google Sheets:")
-                    st.dataframe(pd.DataFrame(latest_rows))
-                else:
-                    st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
-
-            else:
-                st.warning(f"⚠️ Could not save to Google Sheets: {err}")
-
+        # Show last 5 rows for verification
+        latest_rows, err2 = read_from_gsheet(n=5)
+        if latest_rows:
+            st.info("📖 Last 5 rows in Google Sheets:")
+            st.dataframe(pd.DataFrame(latest_rows))
+        else:
+            st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
+    else:
+        st.warning(f"⚠️ Could not save to Google Sheets: {err}")
