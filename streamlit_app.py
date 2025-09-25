@@ -21,24 +21,191 @@ from google.oauth2.service_account import Credentials
 import pandas as pd
 import streamlit as st
 from datetime import datetime
-
+import threading
 # --------------------------
 # Google Sheets Connection
 # --------------------------
-def get_gs_client_from_secrets():
-    info = st.secrets.get("gcp_service_account")
-    if not info:
-        return None, "No gcp_service_account found in st.secrets"
-    try:
-        creds = Credentials.from_service_account_info(
-            info,
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        client = gspread.authorize(creds)
-        return client, None
-    except Exception as e:
-        return None, str(e)
+# -----------------------------
+# Model metadata (Google Drive IDs + local paths)
+# -----------------------------
+MODEL_FILES = { 
+    "vae_model": {
+        "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
+        "path": "Project2_models/vae_model.h5"
+    },
+    "model_2_probabilistic": {
+        "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
+        "path": "Project2_models/model_2_probabilistic.h5"
+    },
+    "bayesian_model": {
+        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
+        "path": "Project2_models/bayesian_model.h5"
+    },
+}
 
+
+# -----------------------------
+# Ensure local directory exists
+# -----------------------------
+def _ensure_models_dir(path: str):
+    d = os.path.dirname(path)
+    if d and not os.path.exists(d):
+        os.makedirs(d, exist_ok=True)
+
+# -----------------------------
+# Download from Google Drive if not present
+# -----------------------------
+def download_model_if_needed(model_key):
+    info = MODEL_FILES[model_key]
+    _ensure_models_dir(info["path"])
+    if not os.path.exists(info["path"]) and not os.path.exists(info["path"] + ".h5"):
+        url = f"https://drive.google.com/uc?id={info['id']}"
+        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
+            gdown.download(url, info["path"], quiet=False)
+    return info["path"]
+
+# -----------------------------
+# Cache-friendly loader
+# -----------------------------
+@st.cache_resource(hash_funcs={dict: lambda _: None})
+def load_model_from_drive(model_key):
+    path = download_model_if_needed(model_key)
+
+    # SavedModel directory
+    if os.path.isdir(path):
+        return tf.keras.models.load_model(path, custom_objects=custom_objects)
+    # HDF5 fallback
+    elif os.path.isfile(path + ".h5"):
+        return tf.keras.models.load_model(path + ".h5", custom_objects=custom_objects)
+    else:
+        st.error(f"❌ Model file not found for {model_key}")
+        st.stop()
+
+# -----------------------------
+# Thread-safe preload dictionary
+# -----------------------------
+_loaded_models = {}
+_loaded_lock = threading.Lock()
+
+def get_model(model_key):
+    """Safe access to models. Guarantees the model is loaded."""
+    with _loaded_lock:
+        if model_key not in _loaded_models:
+            _loaded_models[model_key] = load_model_from_drive(model_key)
+    return _loaded_models[model_key]
+
+# -----------------------------
+# Background preloading (non-blocking)
+# -----------------------------
+def preload_all_models():
+    for key in MODEL_FILES.keys():
+        try:
+            get_model(key)
+            print(f"✅ Preloaded {key}")
+        except Exception as e:
+            print(f"⚠️ Could not preload {key}: {e}")
+
+threading.Thread(target=preload_all_models, daemon=True).start()
+
+# -----------------------------
+# Ensemble safe loader
+# -----------------------------
+# =================================================
+# Google Sheets helpers (kept once, not duplicated)
+# =================================================
+def _format_cell(v):
+    if pd.isna(v):
+        return ""
+    if isinstance(v, (pd.Timestamp, datetime)):
+        return v.isoformat()
+    if isinstance(v, (np.floating, float)):
+        return float(v)
+    if isinstance(v, (np.integer, int)):
+        return int(v)
+    return str(v)
+
+def append_to_gsheet(df, sheet_key=None, worksheet_name=None):
+    if not isinstance(df, pd.DataFrame):
+        try:
+            df = pd.DataFrame(df)
+        except Exception as e:
+            return False, f"append_to_gsheet: could not convert input to DataFrame: {e}"
+
+    if df.shape[0] == 0:
+        return True, None
+
+    client, err = get_gs_client_from_secrets()
+    if client is None:
+        return False, f"Google Sheets client error: {err}"
+
+    sheet_key = sheet_key or st.secrets.get("gsheet_key")
+    worksheet_name = worksheet_name or st.secrets.get("gsheet_worksheet", "predictions")
+
+    if not sheet_key:
+        return False, "No gsheet_key in st.secrets"
+
+    if "docs.google.com" in sheet_key:
+        try:
+            sheet_key = sheet_key.split("/d/")[1].split("/")[0]
+        except Exception:
+            return False, "Invalid gsheet_key format. Must be the spreadsheet ID."
+
+    try:
+        sh = client.open_by_key(sheet_key)
+
+        try:
+            ws = sh.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            rows = max(1000, df.shape[0] + 50)
+            cols = max(len(df.columns) + 5, 10)
+            ws = sh.add_worksheet(title=worksheet_name, rows=str(rows), cols=str(cols))
+            ws.append_row(list(df.columns))
+
+        header = ws.row_values(1)
+        if not header:
+            header = list(df.columns)
+            try:
+                ws.insert_row(header, index=1)
+            except Exception:
+                ws.append_row(header)
+
+        missing_cols = [c for c in list(df.columns) if c not in header]
+        if missing_cols:
+            new_header = header + missing_cols
+            try:
+                ws.update("A1", [new_header])
+                header = new_header
+            except Exception:
+                try:
+                    ws.delete_rows(1)
+                except Exception:
+                    pass
+                try:
+                    ws.insert_row(new_header, index=1)
+                    header = new_header
+                except Exception:
+                    header = header
+
+        rows = []
+        for _, r in df.iterrows():
+            row_values = []
+            for col in header:
+                if col in df.columns:
+                    val = r[col]
+                    row_values.append(_format_cell(val))
+                else:
+                    row_values.append("")
+            rows.append(row_values)
+
+        try:
+            ws.append_rows(rows, value_input_option="USER_ENTERED")
+        except Exception:
+            for row_values in rows:
+                ws.append_row(row_values)
+        return True, None
+
+    except Exception as e:
+        return False, str(e)
 
 # --------------------------
 # Write Predictions
@@ -317,187 +484,12 @@ custom_objects = {
     
 }
 
-
-
 # -----------------------------
-# Google Drive model mapping & loader
+# Load models once (ensemble components)
 # -----------------------------
-# -----------------------------
-# Google Drive model mapping & loader (UPDATED FOR TFP FLIPOUT & SAVEDMODEL)
-# -----------------------------
-# -----------------------------
-# Google Drive model info
-# -----------------------------
-
-# -----------------------------
-# Model definitions
-# -----------------------------
-
-# -----------------------------
-# Model files (Google Drive IDs + local paths)
-# -----------------------------
-# -----------------------------
-# Google Drive Model Mapping
-# -----------------------------
-import threading
-
-
-# -----------------------------
-# Model files (Google Drive IDs + local paths)
-# -----------------------------
-MODEL_FILES = {
-    "vae_model": {
-        "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
-        "path": "models/vae_model"
-    },
-    "model_2_probabilistic": {
-        "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
-        "path": "models/model_2_probabilistic_tf"
-    },
-    "bayesian_model": {
-        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
-        "path": "models/bayesian_model"
-    },
-}
-
-# -----------------------------
-# Ensure local directory exists
-# -----------------------------
-def _ensure_models_dir(path: str):
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
-
-# -----------------------------
-# Download from Google Drive if not present
-# -----------------------------
-def download_model_if_needed(model_key):
-    info = MODEL_FILES[model_key]
-    _ensure_models_dir(info["path"])
-    if not os.path.exists(info["path"]) and not os.path.exists(info["path"] + ".h5"):
-        url = f"https://drive.google.com/uc?id={info['id']}"
-        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
-            gdown.download(url, info["path"], quiet=False)
-    return info["path"]
-
-# -----------------------------
-# Cache-friendly loader
-# -----------------------------
-@st.cache_resource(hash_funcs={dict: lambda _: None})
-def load_model_from_drive(model_key):
-    path = download_model_if_needed(model_key)
-
-    # SavedModel directory
-    if os.path.isdir(path):
-        return tf.keras.models.load_model(path, custom_objects=custom_objects)
-    # HDF5 fallback
-    elif os.path.isfile(path + ".h5"):
-        return tf.keras.models.load_model(path + ".h5", custom_objects=custom_objects)
-    else:
-        st.error(f"❌ Model file not found for {model_key}")
-        st.stop()
-
-# -----------------------------
-# Thread-safe preload dictionary
-# -----------------------------
-_loaded_models = {}
-_loaded_lock = threading.Lock()
-
-def get_model(model_key):
-    """
-    Safe access to models. Guarantees the model is loaded.
-    """
-    with _loaded_lock:
-        if model_key not in _loaded_models:
-            _loaded_models[model_key] = load_model_from_drive(model_key)
-    return _loaded_models[model_key]
-
-# -----------------------------
-# Background preloading (non-blocking)
-# -----------------------------
-def preload_all_models():
-    for key in MODEL_FILES.keys():
-        try:
-            get_model(key)
-            print(f"✅ Preloaded {key}")
-        except Exception as e:
-            print(f"⚠️ Could not preload {key}: {e}")
-
-threading.Thread(target=preload_all_models, daemon=True).start()
-
-
-# -----------------------------
-# Get ensemble (cached models)
-# -----------------------------
-# -----------------------------
-# Get ensemble (cached models)
-# -----------------------------
-# -----------------------------
-# Ensemble safe loader
-# -----------------------------
-import threading
-
-# Global variables for models
-vae_model = None
-model_2 = None
-bayesian_model = None
-
-# Helper: load single model safely
-def safe_load_model(model_key):
-    try:
-        model = load_model_from_drive(model_key)
-        if model is None:
-            st.error(f"❌ {model_key} failed to load!")
-        else:
-            st.success(f"✅ {model_key} loaded")
-        return model
-    except Exception as e:
-        st.error(f"❌ Exception while loading {model_key}: {e}")
-        import traceback
-        st.text(traceback.format_exc())
-        return None
-
-# Preload models in background (non-blocking)
-def preload_ensemble_models():
-    global vae_model, model_2, bayesian_model
-    vae_model = safe_load_model("vae_model")
-    model_2 = safe_load_model("model_2_probabilistic")
-    bayesian_model = safe_load_model("bayesian_model")
-
-threading.Thread(target=preload_ensemble_models, daemon=True).start()
-
-# -----------------------------
-# Lazy loading buttons (optional)
-# -----------------------------
-if st.button("Load VAE Model"):
-    vae_model = safe_load_model("vae_model")
-
-if st.button("Load Probabilistic Model"):
-    model_2 = safe_load_model("model_2_probabilistic")
-
-if st.button("Load Bayesian Model"):
-    bayesian_model = safe_load_model("bayesian_model")
-
-# -----------------------------
-# Ensure ensemble ready before prediction
-# -----------------------------
-def get_ensemble_models():
-    global vae_model, model_2, bayesian_model
-    # Load any missing model lazily
-    if vae_model is None:
-        vae_model = safe_load_model("vae_model")
-    if model_2 is None:
-        model_2 = safe_load_model("model_2_probabilistic")
-    if bayesian_model is None:
-        bayesian_model = safe_load_model("bayesian_model")
-    
-    # Return ensemble list
-    return [vae_model, model_2, bayesian_model]
-
-# Use this in prediction
-ensemble_models = get_ensemble_models()
-
-
+vae_model = get_model("vae_model")
+model_2 = get_model("model_2_probabilistic")
+bayesian_model = get_model("bayesian_model")
 
 # -----------------------------
 # Ensemble prediction function
@@ -561,70 +553,33 @@ def scale_dataframe(df: pd.DataFrame, scaler, cols_to_scale=None) -> pd.DataFram
 # -----------------------------
 # Google Sheets helper
 # -----------------------------
-info = st.secrets["gcp_service_account"]
-
-# Google Sheets config (from secrets.toml)
-sheet_key = st.secrets["gsheet_key"]
-worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
-
 def get_gs_client_from_secrets():
     info = st.secrets.get("gcp_service_account")
     if not info:
         return None, "No gcp_service_account found in st.secrets"
     try:
-        creds = Credentials.from_service_account_info(info, scopes=["https://www.googleapis.com/auth/spreadsheets"])
+        creds = Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
         client = gspread.authorize(creds)
         return client, None
     except Exception as e:
-        return None, str(e)
+        return None, f"Error creating Google Sheets client: {str(e)}"
 
-def append_to_gsheet(df):
-    """
-    Appends all rows of a DataFrame to Google Sheets.
-    """
-    client, err = get_gs_client_from_secrets()
-    if client is None:
-        return False, f"Google Sheets client error: {err}"
+    
+# -----------------------------
+# Ensure local directory exists
+# -----------------------------
 
-    sheet_key = st.secrets.get("gsheet_key")
-    worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
-
-    if not sheet_key:
-        return False, "No gsheet_key in st.secrets"
-
-    # If user accidentally pasted full URL, extract the key
-    if "docs.google.com" in sheet_key:
-        try:
-            sheet_key = sheet_key.split("/d/")[1].split("/")[0]
-        except Exception:
-            return False, "Invalid gsheet_key format. Must be the spreadsheet ID."
-
-    try:
-        sh = client.open_by_key(sheet_key)
-
-        try:
-            ws = sh.worksheet(worksheet_name)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols=str(len(df.columns) + 10))
-            # Write header
-            ws.append_row(list(df.columns))
-
-        # Ensure header consistency
-        header = ws.row_values(1)
-        if not header:
-            header = list(df.columns)
-            ws.append_row(header)
-
-        # Append all rows from DataFrame
-        for _, row in df.iterrows():
-            row_data = [str(row[h]) if h in row else "" for h in header]
-            ws.append_row(row_data)
-
-        return True, None
-    except Exception as e:
-        return False, str(e)
+# -----------------------------
+# Download from Google Drive if not present
+# -----------------------------
 
 
+# -----------------------------
+# Cache-friendly loader
+# -----------------------------
 
 # -----------------------------
 # UI — File upload path
@@ -642,18 +597,18 @@ if uploaded_file is not None:
     st.write("Uploaded Data:")
     st.dataframe(input_df)
 
-    # Warn if extra columns are ignored
+    # Warn about extra columns
     extra_cols = [c for c in input_df.columns if c not in feature_names]
     if extra_cols:
         st.warning(f"⚠️ Extra columns ignored: {extra_cols}")
 
-    # Add missing columns then reorder
+    # Add missing columns and reorder
     for col in feature_names:
         if col not in input_df.columns:
             input_df[col] = 0.0
     input_df = input_df[feature_names].fillna(0.0)
 
-    # Scale only numeric features
+    # Scale numeric features
     try:
         df_scaled = input_df.copy()
         numeric_to_scale = [
@@ -670,20 +625,21 @@ if uploaded_file is not None:
     input_array = input_df.values
 
     # Predict ensemble
-    all_probs = ensemble_models_predict_all(input_array)
+    all_probs = ensemble_models_predict_all(input_array)  # ensure correct shape
     mean_probs = np.mean(all_probs, axis=0)
     mean_probs = ensure_single_output(mean_probs)
     std_devs = np.std(all_probs, axis=0)
     entropy = calculate_entropy(mean_probs)
 
+    # Calibrate probabilities
     try:
-        calibrated_probs = iso_reg.predict(mean_probs)
+        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1))
     except Exception:
-        calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
+        calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1))
 
     predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-    # Results
+    # Construct results
     results_df = input_df.copy()
     results_df["raw_probability"] = mean_probs
     results_df["calibrated_probability"] = calibrated_probs
@@ -693,42 +649,42 @@ if uploaded_file is not None:
 
     st.subheader("Prediction Results")
     st.dataframe(results_df)
+    ok, err = append_to_gsheet(results_df)
+    if ok:
+        st.success("✅ Saved prediction to Google Sheets.")
 
-     # ========================================
-    # Save results to Google Sheets (all rows)
-    # ========================================
-    success, err = append_to_gsheet(results_df)
-    if success:
-        st.success("✅ Results saved to Google Sheets")
-
-        # 🔎 Verification: Show last 5 rows from Google Sheets
         latest_rows, err2 = read_from_gsheet(n=5)
         if latest_rows:
             st.info("📖 Last 5 rows in Google Sheets:")
             st.dataframe(pd.DataFrame(latest_rows))
         else:
             st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
-
     else:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+# ========================================
+# Save results to Google Sheets (all rows)
+# ========================================
 
-    # ========================================
-    # Allow download as CSV
-    # ========================================
-    st.download_button(
-        "📥 Download Results as CSV",
-        results_df.to_csv(index=False),
-        "predictions.csv",
-        "text/csv",
-    )
+    
 # -----------------------------
 # UI — Manual entry path
 # -----------------------------
 # -----------------------------
 # Streamlit UI – Manual entry path
 # -----------------------------
-else:
+
+    # Allow download as CSV
+    st.download_button(
+        "📥 Download Results as CSV",
+        results_df.to_csv(index=False),
+        "predictions.csv",
+        "text/csv",
+    )
+         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+
+    # === Manual entry path ===
     st.subheader("📋 Enter Patient Data Manually")
+    # (here you’ll add input widgets for patient features)
 
     # Define categorical (binary) features
     categorical_features = [
@@ -747,82 +703,77 @@ else:
     feature_names = [f.strip() for f in feature_names]
 
     with st.form("manual_form"):
-        manual_data = {}
-        for feature in feature_names:
-            f_clean = feature.strip()
-            if f_clean in categorical_features:
-                manual_data[f_clean] = st.selectbox(f"{f_clean}", ["No", "Yes"], index=0)
-            else:
-                manual_data[f_clean] = st.number_input(f"{f_clean}", step=0.1, value=0.0)
+    manual_data = {}
+    for feature in feature_names:
+        f_clean = feature.strip()
+        if f_clean in categorical_features:
+            manual_data[f_clean] = st.selectbox(f"{f_clean}", ["No", "Yes"], index=0)
+        else:
+            manual_data[f_clean] = st.number_input(f"{f_clean}", step=0.1, value=0.0)
 
-        submitted = st.form_submit_button("Predict")
+    submitted = st.form_submit_button("Predict")
 
-        if submitted:
-            df_input = pd.DataFrame([manual_data])
+    if submitted:
+        # Convert Yes/No → 1/0
+        raw_input = manual_data.copy()
+        for col in categorical_features:
+            if col in raw_input:
+                raw_input[col] = 1 if raw_input[col] == "Yes" else 0
 
-            # Convert Yes/No → 1/0 for categorical features
-            for col in categorical_features:
-                if col in df_input.columns:
-                    df_input[col] = df_input[col].map({"Yes": 1, "No": 0}).fillna(0)
+        df_input = pd.DataFrame([raw_input])
 
-            # Scale only numeric features (scaler_features from training)
-            try:
-                # Keep a copy
-                df_scaled = df_input.copy()
+        # Scale numeric features
+        try:
+            df_scaled = df_input.copy()
+            numeric_to_scale = [
+                col for col in scaler_features 
+                if col in df_scaled.columns and col not in categorical_features
+            ]
+            if numeric_to_scale:
+                df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
+            df_input = df_scaled
+        except Exception as e:
+            st.error(f"❌ Scaling error: {e}")
+            st.stop()
 
-                # Scale only intersection of numeric + scaler_features
-                numeric_to_scale = [
-                    col for col in scaler_features 
-                    if col in df_scaled.columns and col not in categorical_features
-                ]
+        # Predict
+        input_array = df_input.values
+        all_probs = ensemble_models_predict_all(input_array)
+        mean_probs = np.mean(all_probs, axis=0).reshape(-1)   # force 1-D
+        mean_probs = ensure_single_output(mean_probs)
 
-                if numeric_to_scale:
-                    df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
+        std_devs = np.std(all_probs, axis=0).reshape(-1)
+        entropy = np.atleast_1d(calculate_entropy(mean_probs))  # ensure array
 
-                df_input = df_scaled
+        try:
+            calibrated_probs = iso_reg.predict(mean_probs)
+        except Exception:
+            calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
 
-            except Exception as e:
-                st.error(f"❌ Scaling error: {e}")
-                st.stop()
+        predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-            # Convert to numpy array for prediction
-            input_array = df_input.values
+        # Display
+        st.subheader("Prediction Result")
+        st.write(f"**Raw Probability:** {mean_probs[0]:.3f}")
+        st.write(f"**Calibrated Probability:** {calibrated_probs[0]:.3f}")
+        st.write(f"**Predicted Label:** {'High Risk' if predicted_labels[0] == 1 else 'Low Risk'}")
+        st.write(f"**Uncertainty (Std Dev):** {std_devs[0]:.3f}")
+        st.write(f"**Entropy:** {entropy[0]:.3f}")
+
+        # Save to Google Sheet (store raw input, not scaled)
+        row_to_save = raw_input.copy()
+        row_to_save.update({
+            "raw_probability": float(mean_probs[0]),
+            "calibrated_probability": float(calibrated_probs[0]),
+            "predicted_label": int(predicted_labels[0]),
+            "std_deviation": float(std_devs[0]),
+            "entropy": float(entropy[0]),
+            "timestamp": pd.Timestamp.now().isoformat()
+        })
 
 
-            # Predict ensemble
-            all_probs = ensemble_models_predict_all(input_array)
-            mean_probs = np.mean(all_probs, axis=0)
-            mean_probs = ensure_single_output(mean_probs)
-
-            std_devs = np.std(all_probs, axis=0)
-            entropy = calculate_entropy(mean_probs)
-
-            try:
-                calibrated_probs = iso_reg.predict(mean_probs)
-            except Exception:
-                calibrated_probs = iso_reg.predict(np.asarray(mean_probs))
-
-            predicted_labels = (calibrated_probs >= best_threshold).astype(int)
-
-            st.subheader("Prediction Result")
-            st.write(f"**Raw Probability:** {mean_probs[0]:.3f}")
-            st.write(f"**Calibrated Probability:** {calibrated_probs[0]:.3f}")
-            st.write(f"**Predicted Label:** {'High Risk' if predicted_labels[0] == 1 else 'Low Risk'}")
-            st.write(f"**Uncertainty (Std Dev):** {std_devs[0]:.3f}")
-            st.write(f"**Entropy:** {entropy[0]:.3f}")
-
-            # Save to Google Sheet (if configured)
-            row_to_save = df_input.iloc[0].to_dict()
-            row_to_save.update({
-                "raw_probability": float(mean_probs[0]),
-                "calibrated_probability": float(calibrated_probs[0]),
-                "predicted_label": int(predicted_labels[0]),
-                "std_deviation": float(std_devs[0]),
-                "entropy": float(entropy[0]),
-                "timestamp": pd.Timestamp.now().isoformat()
-            })
-
-            ok, err = append_to_gsheet(pd.DataFrame([row_to_save]))
+            row_df = pd.DataFrame([row_to_save])
+            ok, err = append_to_gsheet(row_df)
             if ok:
                 st.success("✅ Saved prediction to Google Sheets.")
 
