@@ -31,17 +31,17 @@ import threading
 MODEL_FILES = { 
     "vae_model": {
         "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
-        "path": "Project2_models/h5_files/vae_model.h5"
+        "path": "models/vae_model.h5"
     },
     "model_2_probabilistic": {
         "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
-        "path": "Project2_models/h5_files/model_2_probabilistic.h5"
+        "path": "models/model_2_probabilistic.h5"
     },
     "bayesian_model": {
         "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
-        "path": "Project2_models/h5_files/bayesian_model.h5"
+        "path": "models/bayesian_model.h5"
     },
-}
+}    
 
 
 # -----------------------------
@@ -490,6 +490,7 @@ custom_objects = {
 vae_model = get_model("vae_model")
 model_2 = get_model("model_2_probabilistic")
 bayesian_model = get_model("bayesian_model")
+
 
 # -----------------------------
 # Ensemble prediction function
