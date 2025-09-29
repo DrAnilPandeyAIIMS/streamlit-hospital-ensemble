@@ -28,6 +28,9 @@ import threading
 # -----------------------------
 # Model metadata (Google Drive IDs + local paths)
 # -----------------------------
+# -----------------------------
+# Model file dictionary
+# -----------------------------
 MODEL_FILES = { 
     "vae_model": {
         "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
@@ -40,32 +43,11 @@ MODEL_FILES = {
     "bayesian_model": {
         "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
         "path": "models/bayesian_model.h5"
-    },
-}    
-
-
-# -----------------------------
-# Ensure local directory exists
-# -----------------------------
-def _ensure_models_dir(path: str):
-    d = os.path.dirname(path)
-    if d and not os.path.exists(d):
-        os.makedirs(d, exist_ok=True)
+    }
+}
 
 # -----------------------------
-# Download from Google Drive if not present
-# -----------------------------
-def download_model_if_needed(model_key):
-    info = MODEL_FILES[model_key]
-    _ensure_models_dir(info["path"])
-    if not os.path.exists(info["path"]) and not os.path.exists(info["path"] + ".h5"):
-        url = f"https://drive.google.com/uc?id={info['id']}"
-        with st.spinner(f"📥 Downloading {os.path.basename(info['path'])}..."):
-            gdown.download(url, info["path"], quiet=False)
-    return info["path"]
-
-# -----------------------------
-# Cache-friendly loader
+# Model loading function
 # -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
@@ -75,8 +57,8 @@ def load_model_from_drive(model_key):
     if os.path.isdir(path):
         return tf.keras.models.load_model(path, custom_objects=custom_objects)
     # HDF5 fallback
-    elif os.path.isfile(path + ".h5"):
-        return tf.keras.models.load_model(path + ".h5", custom_objects=custom_objects)
+    elif os.path.isfile(path):
+        return tf.keras.models.load_model(path, custom_objects=custom_objects)
     else:
         st.error(f"❌ Model file not found for {model_key}")
         st.stop()
@@ -94,9 +76,6 @@ def get_model(model_key):
             _loaded_models[model_key] = load_model_from_drive(model_key)
     return _loaded_models[model_key]
 
-# -----------------------------
-# Background preloading (non-blocking)
-# -----------------------------
 def preload_all_models():
     for key in MODEL_FILES.keys():
         try:
@@ -105,7 +84,11 @@ def preload_all_models():
         except Exception as e:
             print(f"⚠️ Could not preload {key}: {e}")
 
+# Run preload in background
 threading.Thread(target=preload_all_models, daemon=True).start()
+
+# Get models
+
 
 # -----------------------------
 # Ensemble safe loader
