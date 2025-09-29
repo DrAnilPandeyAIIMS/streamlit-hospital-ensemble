@@ -496,21 +496,23 @@ bayesian_model = get_model("bayesian_model")
 # Ensemble prediction function
 # -----------------------------
 def ensemble_models_predict_all(input_array, n_forward_passes=100):
+    """
+    Run n_forward_passes Monte Carlo forward passes 
+    for all probabilistic models to estimate uncertainty.
+    """
     input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)
     all_model_probs = []
 
-    vae_probs = vae_model(input_tensor, training=False).numpy().flatten()
-    vae_stack = np.stack([vae_probs] * n_forward_passes)
-    all_model_probs.append(vae_stack)
-
-    for model in [model_2, bayesian_model]:
+    for model in [vae_model, model_2, bayesian_model]:
         model_probs = [
             model(input_tensor, training=True).numpy().flatten()
             for _ in range(n_forward_passes)
         ]
         all_model_probs.append(np.array(model_probs))
 
+    # Concatenate results from all models
     all_model_probs = np.concatenate(all_model_probs, axis=0)
+
     return all_model_probs
 
 # -----------------------------
