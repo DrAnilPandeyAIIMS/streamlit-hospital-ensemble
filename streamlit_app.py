@@ -674,13 +674,14 @@ if uploaded_file is not None:
         st.success("✅ Saved prediction to Google Sheets.")
 
         latest_rows, err2 = read_from_gsheet(n=5)
-        if latest_rows:
+        if latest_rows is not None and not latest_rows.empty:
             st.info("📖 Last 5 rows in Google Sheets:")
             st.dataframe(pd.DataFrame(latest_rows))
         else:
             st.warning(f"⚠️ Could not read back from Google Sheets: {err2}")
     else:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+
 
     # Allow download as CSV
     st.download_button(
@@ -788,9 +789,9 @@ if submitted:
     if ok:
         st.success("✅ Saved prediction to Google Sheets.")
 
-        # Show last 5 rows for verification
+    # Show last 5 rows for verification
         latest_rows, err2 = read_from_gsheet(n=5)
-        if latest_rows:
+        if latest_rows is not None and not latest_rows.empty:
             st.info("📖 Last 5 rows in Google Sheets:")
             st.dataframe(pd.DataFrame(latest_rows))
         else:
