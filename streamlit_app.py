@@ -31,7 +31,16 @@ import threading
 # -----------------------------
 # Model file dictionary
 # -----------------------------
-MODEL_FILES = { 
+import os
+import threading
+import gdown
+import tensorflow as tf
+import streamlit as st
+
+# -----------------------------
+# Model registry
+# -----------------------------
+MODEL_FILES = {
     "vae_model": {
         "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
         "path": "models/vae_model.h5"
@@ -43,11 +52,34 @@ MODEL_FILES = {
     "bayesian_model": {
         "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
         "path": "models/bayesian_model.h5"
-    }
+    },
 }
 
 # -----------------------------
-# Model loading function
+# Google Drive download helper
+# -----------------------------
+def download_model_if_needed(model_key):
+    """Download model from Google Drive if not already present locally."""
+    info = MODEL_FILES[model_key]
+    path = info["path"]
+
+    # If already exists, return path
+    if os.path.exists(path):
+        return path
+
+    # Otherwise, download
+    try:
+        gdown.download(id=info["id"], output=path, quiet=False)
+        if os.path.exists(path):
+            return path
+        else:
+            raise FileNotFoundError(f"Download failed, file not found at {path}")
+    except Exception as e:
+        st.error(f"❌ Could not download model {model_key}: {e}")
+        st.stop()
+
+# -----------------------------
+# Load model wrapper
 # -----------------------------
 @st.cache_resource(hash_funcs={dict: lambda _: None})
 def load_model_from_drive(model_key):
@@ -84,11 +116,10 @@ def preload_all_models():
         except Exception as e:
             print(f"⚠️ Could not preload {key}: {e}")
 
-# Run preload in background
+# Start background preload
 threading.Thread(target=preload_all_models, daemon=True).start()
 
 # Get models
-
 
 # -----------------------------
 # Ensemble safe loader
