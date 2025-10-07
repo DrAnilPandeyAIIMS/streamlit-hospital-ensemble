@@ -246,51 +246,49 @@ categorical_features = set([
 # ===============================
 # Preprocessing Function
 # ===============================
-def preprocess_input(df_raw, scaler, categorical_features):
+def preprocess_input(df: pd.DataFrame, features: list, scaler):
     """
-    Preprocesses input data using the scaler's feature_names_in_ as the single source of truth.
-    - Converts categorical features to numeric
-    - Reindexes columns to match scaler expectation
-    - Applies scaling
+    Preprocess incoming data:
+      - Map categorical values (Yes/No/yes/no/0/1) → 1/0
+      - Align with scaler’s expected features
+      - Scale numeric columns only
     """
-    df_proc = df_raw.copy()
+    df_proc = df.copy()
 
-    # ✅ Convert categorical Yes/No → 1/0
+    # Normalize categorical inputs
+    yes_no_map = {
+        "Yes": 1, "yes": 1, "Y": 1, "y": 1, 1: 1, "1": 1,
+        "No": 0, "no": 0, "N": 0, "n": 0, 0: 0, "0": 0
+    }
     for col in categorical_features:
         if col in df_proc.columns:
-            df_proc[col] = df_proc[col].map({"Yes": 1, "No": 0}).fillna(0)
+            df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    # ✅ Use scaler's feature names as the truth
+    # ✅ Use scaler’s expected feature order as the single source of truth
     if hasattr(scaler, "feature_names_in_"):
-        features = list(scaler.feature_names_in_)
+        expected_features = list(scaler.feature_names_in_)
     else:
-        raise ValueError("Scaler does not have feature_names_in_. Refit scaler with sklearn >=1.0.")
+        expected_features = features
 
-    # ✅ Ensure dataframe matches scaler's expected columns & order
-    df_proc = df_proc.reindex(columns=features, fill_value=0)
+    # Add missing columns with default 0
+    for col in expected_features:
+        if col not in df_proc.columns:
+            df_proc[col] = 0
 
-    # ✅ Apply scaling
-    X_scaled = scaler.transform(df_proc)
-
-    return X_scaled, features
-
-df_proc = df_proc.reindex(columns=features)
-
-    # ✅ Match scaler expected features
-    if hasattr(scaler, "feature_names_in_"):
-        scaler_features = list(scaler.feature_names_in_)
-        if scaler_features != features:
-            st.warning("⚠️ Features order adjusted to match scaler")
-            df_proc = df_proc.reindex(columns=scaler_features)
+    # Keep only expected features (correct order)
+    df_proc = df_proc.reindex(columns=expected_features)
 
     # Scale numeric only
+    numeric_to_scale = [c for c in expected_features if c not in categorical_features]
     try:
-        df_proc[df_proc.columns] = scaler.transform(df_proc[df_proc.columns])
+        if numeric_to_scale:
+            df_proc[numeric_to_scale] = scaler.transform(df_proc[numeric_to_scale])
     except Exception as e:
-        st.error(f"❌ Scaling error even after alignment: {e}")
+        st.error(f"❌ Scaling error: {e}")
         st.stop()
 
     return df_proc
+
 
 
 # ===============================
