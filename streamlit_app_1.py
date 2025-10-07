@@ -153,13 +153,24 @@ bayesian_model = get_model("bayesian_model")
 # Ensemble predictions
 # -----------------------------
 def ensemble_models_predict_all(input_array, n_forward_passes=10):
-    input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)
+    """
+    Returns concatenated model forward pass probabilities with shape (models * passes, samples)
+    """
+    input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)   
     all_model_probs = []
     for model in [vae_model, model_2, bayesian_model]:
-        model_probs = [model(input_tensor, training=True).numpy().flatten()
-                       for _ in range(n_forward_passes)]
+        model_probs = []
+        for _ in range(n_forward_passes):
+            preds = model(input_tensor, training=True).numpy()
+            # preds might be shape (samples,1) or (samples,)
+            if preds.ndim == 2 and preds.shape[1] == 1:
+                preds = preds.flatten()
+            model_probs.append(preds)
+        # model_probs shape: (passes, samples)
         all_model_probs.append(np.array(model_probs))
+    # concatenate across models on axis 0 -> shape (models*passes, samples)
     return np.concatenate(all_model_probs, axis=0)
+
 
 def calculate_entropy(probs):
     probs = np.clip(np.ravel(probs), 1e-9, 1-1e-9)
@@ -185,50 +196,35 @@ except Exception as e:
 # Load scaler + features
 # -----------------------------
 
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-
 # ===============================
 # Load Scaler & Features
 # ===============================
 @st.cache_resource
 def load_scaler_and_features():
     scaler_path = "models/scaler.pkl"
-    features_path = r"C:\Users\akpan\Downloads\Project_2_backup_backup\models\feature_names.pkl"
+    features_path = "models/feature_names.pkl"
 
     # Load scaler
     obj = joblib.load(scaler_path)
-    scaler, cols = None, None
-
     if isinstance(obj, tuple):
-        if hasattr(obj[0], "transform"):
-            scaler = obj[0]
-            cols = obj[1] if len(obj) > 1 else None
-        elif isinstance(obj[0], tuple) and hasattr(obj[0][0], "transform"):
-            scaler = obj[0][0]
-            cols = obj[0][1] if len(obj[0]) > 1 else None
-        else:
-            for el in obj:
-                if hasattr(el, "transform"):
-                    scaler = el
-                    break
+        scaler = obj[0] if hasattr(obj[0], "transform") else None
     else:
-        if hasattr(obj, "transform"):
-            scaler = obj
-
+        scaler = obj if hasattr(obj, "transform") else None
     if scaler is None:
-        raise RuntimeError(f"❌ scaler.pkl did not produce a transformer. Got: {type(obj)}")
+        raise RuntimeError(f"❌ scaler.pkl did not contain a valid transformer. Got: {type(obj)}")
 
     # Load feature names
     try:
-        features = list(joblib.load(features_path))
+        features = joblib.load(features_path)
+        if not isinstance(features, (list, tuple)):
+            raise ValueError("feature_names.pkl must contain a list of feature names")
+        features = list(features)
     except Exception as e:
         st.error(f"❌ Could not load feature_names.pkl from {features_path}: {e}")
         st.stop()
 
     return scaler, features
+
 
 scaler, FEATURES = load_scaler_and_features()
 
@@ -254,8 +250,10 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
     """
     Preprocess incoming data:
       - Map categorical values (Yes/No/yes/no/0/1) → 1/0
-      - Align columns with training features
+      - Add missing features with defaults (0)
+      - Drop extra features
       - Scale numeric columns only
+      - User-friendly warnings instead of stopping
     """
     df_proc = df.copy()
 
@@ -266,28 +264,44 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
     }
     for col in categorical_features:
         if col in df_proc.columns:
-            df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
-
-    # Align to training features
+            df_proc[col] = df_proc[col].map(yes_no_map)
+    
+    # Identify missing and extra features
     missing = set(features) - set(df_proc.columns)
     extra = set(df_proc.columns) - set(features)
-
+    
     if missing:
-        st.error(f"❌ Missing features in input: {missing}")
-        st.stop()
+        st.warning(f"⚠️ Missing features defaulted to 0: {missing}")
+        for col in missing:
+            df_proc[col] = 0
+
     if extra:
         st.warning(f"⚠️ Extra features ignored: {extra}")
-
+    
+    # Keep only expected features (in correct order)
     df_proc = df_proc.reindex(columns=features)
+    
+    # Fill any remaining NaNs (safety)
+    df_proc = df_proc.fillna(0)
 
-    # Scale numeric only
+    # Ensure categorical features are integers
+    for col in categorical_features:
+        if col in df_proc.columns:
+            try:
+                df_proc[col] = df_proc[col].astype(int)
+            except Exception:
+                df_proc[col] = df_proc[col].apply(
+                    lambda x: 1 if str(x).lower() in ("1","yes","y","true") else 0
+                )
+    
+    # Scale numeric columns
     numeric_to_scale = [c for c in features if c not in categorical_features]
-    try:
-        if numeric_to_scale:
+    if numeric_to_scale:
+        try:
             df_proc[numeric_to_scale] = scaler.transform(df_proc[numeric_to_scale])
-    except Exception as e:
-        st.error(f"❌ Scaling error: {e}")
-        st.stop()
+        except Exception as e:
+            st.error(f"❌ Scaling error: {e}")
+            st.stop()
 
     return df_proc
 
@@ -298,21 +312,37 @@ input_method = st.radio("Choose input method", ["Manual Entry", "Upload CSV"])
 df_input = None
 
 if input_method == "Manual Entry":
+    st.info("Fill values for all features (missing categorical defaults to No).")
     input_dict = {}
     for feat in FEATURES:
         if feat in categorical_features:
             input_dict[feat] = st.selectbox(f"{feat}", ["No", "Yes"], index=0)
         else:
-            input_dict[feat] = st.number_input(f"{feat}", step=0.1, value=0.0)
-    if st.button("Predict"):
-        df_input = pd.DataFrame([input_dict])
+            # default 0.0, allow float input
+            input_dict[feat] = st.number_input(f"{feat}", step=0.1, value=0.0, format="%.3f")
+
+    if st.button("Predict (Manual)"):
+        # convert categorical to 1/0 here
+        raw_input = input_dict.copy()
+        for col in categorical_features:
+            if col in raw_input:
+                raw_input[col] = 1 if raw_input[col] == "Yes" else 0
+        df_input = pd.DataFrame([raw_input])
 
 elif input_method == "Upload CSV":
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
-    if uploaded_file:
-        df_input = pd.read_csv(uploaded_file)
-        if st.button("Predict"):
-            pass
+    if uploaded_file is not None:
+        try:
+            df_input = pd.read_csv(uploaded_file)
+            st.write("Preview of uploaded file:")
+            st.dataframe(df_input.head())
+            if st.button("Predict (CSV)"):
+                # keep df_input as-is and let prediction block handle it
+                pass
+        except Exception as e:
+            st.error(f"❌ Could not read uploaded CSV: {e}")
+            df_input = None
+
 
 # ===============================
 # Prediction
