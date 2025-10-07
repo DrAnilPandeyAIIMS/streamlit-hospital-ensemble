@@ -246,64 +246,52 @@ categorical_features = set([
 # ===============================
 # Preprocessing Function
 # ===============================
-def preprocess_input(df: pd.DataFrame, features: list, scaler):
+def preprocess_input(df_raw, scaler, categorical_features):
     """
-    Preprocess incoming data:
-      - Map categorical values (Yes/No/yes/no/0/1) → 1/0
-      - Add missing features with defaults (0)
-      - Drop extra features
-      - Scale numeric columns only
-      - User-friendly warnings instead of stopping
+    Preprocesses input data using the scaler's feature_names_in_ as the single source of truth.
+    - Converts categorical features to numeric
+    - Reindexes columns to match scaler expectation
+    - Applies scaling
     """
-    df_proc = df.copy()
+    df_proc = df_raw.copy()
 
-    # Normalize categorical inputs
-    yes_no_map = {
-        "Yes": 1, "yes": 1, "Y": 1, "y": 1, 1: 1, "1": 1,
-        "No": 0, "no": 0, "N": 0, "n": 0, 0: 0, "0": 0
-    }
+    # ✅ Convert categorical Yes/No → 1/0
     for col in categorical_features:
         if col in df_proc.columns:
-            df_proc[col] = df_proc[col].map(yes_no_map)
-    
-    # Identify missing and extra features
-    missing = set(features) - set(df_proc.columns)
-    extra = set(df_proc.columns) - set(features)
-    
-    if missing:
-        st.warning(f"⚠️ Missing features defaulted to 0: {missing}")
-        for col in missing:
-            df_proc[col] = 0
+            df_proc[col] = df_proc[col].map({"Yes": 1, "No": 0}).fillna(0)
 
-    if extra:
-        st.warning(f"⚠️ Extra features ignored: {extra}")
-    
-    # Keep only expected features (in correct order)
-    df_proc = df_proc.reindex(columns=features)
-    
-    # Fill any remaining NaNs (safety)
-    df_proc = df_proc.fillna(0)
+    # ✅ Use scaler's feature names as the truth
+    if hasattr(scaler, "feature_names_in_"):
+        features = list(scaler.feature_names_in_)
+    else:
+        raise ValueError("Scaler does not have feature_names_in_. Refit scaler with sklearn >=1.0.")
 
-    # Ensure categorical features are integers
-    for col in categorical_features:
-        if col in df_proc.columns:
-            try:
-                df_proc[col] = df_proc[col].astype(int)
-            except Exception:
-                df_proc[col] = df_proc[col].apply(
-                    lambda x: 1 if str(x).lower() in ("1","yes","y","true") else 0
-                )
-    
-    # Scale numeric columns
-    numeric_to_scale = [c for c in features if c not in categorical_features]
-    if numeric_to_scale:
-        try:
-            df_proc[numeric_to_scale] = scaler.transform(df_proc[numeric_to_scale])
-        except Exception as e:
-            st.error(f"❌ Scaling error: {e}")
-            st.stop()
+    # ✅ Ensure dataframe matches scaler's expected columns & order
+    df_proc = df_proc.reindex(columns=features, fill_value=0)
+
+    # ✅ Apply scaling
+    X_scaled = scaler.transform(df_proc)
+
+    return X_scaled, features
+
+df_proc = df_proc.reindex(columns=features)
+
+    # ✅ Match scaler expected features
+    if hasattr(scaler, "feature_names_in_"):
+        scaler_features = list(scaler.feature_names_in_)
+        if scaler_features != features:
+            st.warning("⚠️ Features order adjusted to match scaler")
+            df_proc = df_proc.reindex(columns=scaler_features)
+
+    # Scale numeric only
+    try:
+        df_proc[df_proc.columns] = scaler.transform(df_proc[df_proc.columns])
+    except Exception as e:
+        st.error(f"❌ Scaling error even after alignment: {e}")
+        st.stop()
 
     return df_proc
+
 
 # ===============================
 # Input Method
