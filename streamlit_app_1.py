@@ -248,10 +248,11 @@ categorical_features = set([
 # ===============================
 def preprocess_input(df: pd.DataFrame, features: list, scaler):
     """
-    Preprocess incoming data:
-      - Map categorical values (Yes/No/yes/no/0/1) → 1/0
-      - Align with scaler’s expected features
-      - Scale numeric columns only
+    Preprocess input to match training features:
+      - Normalize categorical values
+      - Add missing features with default 0
+      - Ensure correct order (from scaler or FEATURES)
+      - Scale numeric features
     """
     df_proc = df.copy()
 
@@ -264,33 +265,83 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
         if col in df_proc.columns:
             df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    # ✅ Use scaler’s expected feature order as the single source of truth
+    # ✅ Decide final feature order
     if hasattr(scaler, "feature_names_in_"):
         expected_features = list(scaler.feature_names_in_)
     else:
         expected_features = features
 
-    # Add missing columns with default 0
+    # Add missing features with default 0
     for col in expected_features:
         if col not in df_proc.columns:
             df_proc[col] = 0
 
-    # Keep only expected features (correct order)
+    # Keep only expected features, in correct order
     df_proc = df_proc.reindex(columns=expected_features)
 
     # Scale numeric only
     numeric_to_scale = [c for c in expected_features if c not in categorical_features]
-    try:
-        if numeric_to_scale:
+    if numeric_to_scale:
+        try:
             df_proc[numeric_to_scale] = scaler.transform(df_proc[numeric_to_scale])
-    except Exception as e:
-        st.error(f"❌ Scaling error: {e}")
-        st.stop()
+        except Exception as e:
+            st.error(f"❌ Scaling error: {e}")
+            st.stop()
 
     return df_proc
+# Google Sheets Integration
+# ===============================
+def get_gs_client_from_secrets():
+    info = st.secrets.get("gcp_service_account")
+    if not info:
+        return None, "No gcp_service_account found in st.secrets"
+    try:
+        creds = Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        client = gspread.authorize(creds)
+        return client, None
+    except Exception as e:
+        return None, f"Error creating Google Sheets client: {str(e)}"
+
+def log_to_gsheet(input_df, preds):
+    client, err = get_gs_client_from_secrets()
+    if client is None:
+        st.warning(f"⚠️ Could not save to Google Sheets: {err}")
+        return
+    try:
+        sheet_key = st.secrets.get("gsheet_key")
+        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+        sh = client.open_by_key(sheet_key)
+        ws = sh.worksheet(worksheet_name)
+
+        row = input_df.iloc[0].tolist() + [str(preds)]
+        ws.append_row(row)
+        st.success("✅ Prediction logged to Google Sheets")
+    except Exception as e:
+        st.error(f"❌ Failed to log to Google Sheet: {e}")
+
+def read_from_gsheet(n=5):
+    client, err = get_gs_client_from_secrets()
+    if client is None:
+        return None, f"Google Sheets client error: {err}"
+    try:
+        sheet_key = st.secrets.get("gsheet_key")
+        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+        sh = client.open_by_key(sheet_key)
+        ws = sh.worksheet(worksheet_name)
+        all_values = ws.get_all_values()
+        if not all_values:
+            return [], None
+        return all_values[-n:], None
+    except Exception as e:
+        return None, f"Error reading from Google Sheets: {str(e)}"
 
 
-
+# ===============================
+# Input Method
+# ===============================
 # ===============================
 # Input Method
 # ===============================
@@ -298,22 +349,23 @@ input_method = st.radio("Choose input method", ["Manual Entry", "Upload CSV"])
 df_input = None
 
 if input_method == "Manual Entry":
-    st.info("Fill values for all features (missing categorical defaults to No).")
+    st.info("All features have defaults. Change only the relevant ones.")
+
     input_dict = {}
     for feat in FEATURES:
         if feat in categorical_features:
+            # default "No"
             input_dict[feat] = st.selectbox(f"{feat}", ["No", "Yes"], index=0)
         else:
-            # default 0.0, allow float input
+            # default 0.0
             input_dict[feat] = st.number_input(f"{feat}", step=0.1, value=0.0, format="%.3f")
 
     if st.button("Predict (Manual)"):
-        # convert categorical to 1/0 here
-        raw_input = input_dict.copy()
+        # convert categorical Yes/No → 1/0
         for col in categorical_features:
-            if col in raw_input:
-                raw_input[col] = 1 if raw_input[col] == "Yes" else 0
-        df_input = pd.DataFrame([raw_input])
+            if col in input_dict:
+                input_dict[col] = 1 if input_dict[col] == "Yes" else 0
+        df_input = pd.DataFrame([input_dict])
 
 elif input_method == "Upload CSV":
     uploaded_file = st.file_uploader("Upload CSV", type="csv")
@@ -323,13 +375,14 @@ elif input_method == "Upload CSV":
             st.write("Preview of uploaded file:")
             st.dataframe(df_input.head())
             if st.button("Predict (CSV)"):
-                # keep df_input as-is and let prediction block handle it
                 pass
         except Exception as e:
             st.error(f"❌ Could not read uploaded CSV: {e}")
             df_input = None
 
-
+# ===============================
+# Prediction
+# ===============================
 # ===============================
 # Prediction
 # ===============================
@@ -337,11 +390,9 @@ if df_input is not None and not df_input.empty:
     try:
         # ✅ Preprocess input
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
-
-        # Convert to numpy
         X_input = df_prepared.values
 
-        # 🔹 Your model prediction function here
+        # 🔹 Ensemble model predictions
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
         mean_probs = all_probs.mean(axis=0)
         std_devs = all_probs.std(axis=0)
@@ -362,9 +413,25 @@ if df_input is not None and not df_input.empty:
             "Entropy": entropy
         })
 
+        # ===========================
+        # Display results
+        # ===========================
         st.success("✅ Prediction Completed")
         st.subheader("📊 Prediction Result")
         st.dataframe(results_df)
+
+        # ===========================
+        # Google Sheets logging
+        # ===========================
+        log_to_gsheet(df_input, predicted_labels)
+
+        # Show latest 5 rows from Google Sheets
+        latest_rows, err = read_from_gsheet(n=5)
+        if latest_rows is not None and latest_rows:
+            st.info("📖 Last 5 rows in Google Sheets:")
+            st.dataframe(pd.DataFrame(latest_rows))
+        else:
+            st.warning(f"⚠️ Could not read back from Google Sheets: {err}")
 
     except Exception as e:
         st.error(f"❌ Prediction failed: {e}")
