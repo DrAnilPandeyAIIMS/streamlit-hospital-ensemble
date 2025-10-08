@@ -224,21 +224,38 @@ categorical_features = set([
 # -----------------------------
 # Preprocessing Function
 # -----------------------------
+# ===============================
+# Preprocessing Function (Fixed)
+# ===============================
 def preprocess_input(df: pd.DataFrame, features: list, scaler):
+    """
+    Preprocess input to match training features:
+      - Normalize categorical values
+      - Add missing features with default 0
+      - Ensure correct order (always full FEATURES list)
+      - Scale numeric features
+    """
     df_proc = df.copy()
-    yes_no_map = {"Yes":1,"No":0,"Y":1,"N":0,"y":1,"n":0,1:1,0:0,"1":1,"0":0}
 
+    # Normalize categorical inputs
+    yes_no_map = {
+        "Yes": 1, "No": 0,
+        "Y": 1, "N": 0,
+        "y": 1, "n": 0,
+        1: 1, 0: 0,
+        "1": 1, "0": 0
+    }
     for col in categorical_features:
         if col in df_proc.columns:
             df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    if hasattr(scaler, "feature_names_in_"):
-        expected_features = list(scaler.feature_names_in_)
-    else:
-        expected_features = features
+    # ✅ Always enforce full feature set (67 features from FEATURES)
+    expected_features = features
 
+    # Add missing features with 0 and keep correct order
     df_proc = df_proc.reindex(columns=expected_features, fill_value=0)
 
+    # Scale only numeric features
     numeric_to_scale = [c for c in expected_features if c not in categorical_features]
     if numeric_to_scale:
         try:
@@ -247,7 +264,11 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
             st.error(f"❌ Scaling error: {e}")
             st.stop()
 
+    # Debug: check shape before returning
+    st.write("✅ Preprocessed shape:", df_proc.shape)
+
     return df_proc
+
 
 # -----------------------------
 # Google Sheets Integration
