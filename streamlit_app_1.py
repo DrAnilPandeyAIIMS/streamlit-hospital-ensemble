@@ -20,7 +20,6 @@ from google.oauth2.service_account import Credentials
 warnings.filterwarnings("ignore")
 sys.path.append(".")
 
-
 # -----------------------------
 # Streamlit UI
 # -----------------------------
@@ -153,24 +152,17 @@ bayesian_model = get_model("bayesian_model")
 # Ensemble predictions
 # -----------------------------
 def ensemble_models_predict_all(input_array, n_forward_passes=10):
-    """
-    Returns concatenated model forward pass probabilities with shape (models * passes, samples)
-    """
     input_tensor = tf.convert_to_tensor(input_array, dtype=tf.float32)   
     all_model_probs = []
     for model in [vae_model, model_2, bayesian_model]:
         model_probs = []
         for _ in range(n_forward_passes):
             preds = model(input_tensor, training=True).numpy()
-            # preds might be shape (samples,1) or (samples,)
             if preds.ndim == 2 and preds.shape[1] == 1:
                 preds = preds.flatten()
             model_probs.append(preds)
-        # model_probs shape: (passes, samples)
         all_model_probs.append(np.array(model_probs))
-    # concatenate across models on axis 0 -> shape (models*passes, samples)
     return np.concatenate(all_model_probs, axis=0)
-
 
 def calculate_entropy(probs):
     probs = np.clip(np.ravel(probs), 1e-9, 1-1e-9)
@@ -195,42 +187,28 @@ except Exception as e:
 # -----------------------------
 # Load scaler + features
 # -----------------------------
-
-# ===============================
-# Load Scaler & Features
-# ===============================
 @st.cache_resource
 def load_scaler_and_features():
     scaler_path = "models/scaler.pkl"
     features_path = "models/feature_names.pkl"
 
-    # Load scaler
     obj = joblib.load(scaler_path)
-    if isinstance(obj, tuple):
-        scaler = obj[0] if hasattr(obj[0], "transform") else None
-    else:
-        scaler = obj if hasattr(obj, "transform") else None
-    if scaler is None:
-        raise RuntimeError(f"❌ scaler.pkl did not contain a valid transformer. Got: {type(obj)}")
+    scaler = obj[0] if isinstance(obj, tuple) and hasattr(obj[0], "transform") else obj
+    if not hasattr(scaler, "transform"):
+        raise RuntimeError("❌ scaler.pkl did not contain a valid transformer")
 
-    # Load feature names
-    try:
-        features = joblib.load(features_path)
-        if not isinstance(features, (list, tuple)):
-            raise ValueError("feature_names.pkl must contain a list of feature names")
-        features = list(features)
-    except Exception as e:
-        st.error(f"❌ Could not load feature_names.pkl from {features_path}: {e}")
-        st.stop()
+    features = joblib.load(features_path)
+    if not isinstance(features, (list, tuple)):
+        raise ValueError("feature_names.pkl must contain a list of feature names")
+    features = list(features)
 
     return scaler, features
 
-
 scaler, FEATURES = load_scaler_and_features()
 
-# ===============================
+# -----------------------------
 # Define categorical features
-# ===============================
+# -----------------------------
 categorical_features = set([
     "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
     "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
@@ -243,38 +221,24 @@ categorical_features = set([
     "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
 ])
 
-# ===============================
+# -----------------------------
 # Preprocessing Function
-# ===============================
+# -----------------------------
 def preprocess_input(df: pd.DataFrame, features: list, scaler):
-    """
-    Preprocess input to match training features:
-      - Normalize categorical values
-      - Add missing features with default 0
-      - Ensure correct order (from scaler or FEATURES)
-      - Scale numeric features
-    """
     df_proc = df.copy()
+    yes_no_map = {"Yes":1,"No":0,"Y":1,"N":0,"y":1,"n":0,1:1,0:0,"1":1,"0":0}
 
-    # Normalize categorical inputs
-    yes_no_map = {
-        "Yes": 1, "yes": 1, "Y": 1, "y": 1, 1: 1, "1": 1,
-        "No": 0, "no": 0, "N": 0, "n": 0, 0: 0, "0": 0
-    }
     for col in categorical_features:
         if col in df_proc.columns:
             df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    # ✅ Decide final feature order
     if hasattr(scaler, "feature_names_in_"):
         expected_features = list(scaler.feature_names_in_)
     else:
         expected_features = features
 
-    # ✅ Ensure all expected features exist, with default 0 if missing
     df_proc = df_proc.reindex(columns=expected_features, fill_value=0)
 
-    # Scale numeric only
     numeric_to_scale = [c for c in expected_features if c not in categorical_features]
     if numeric_to_scale:
         try:
@@ -285,8 +249,9 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
 
     return df_proc
 
+# -----------------------------
 # Google Sheets Integration
-# ===============================
+# -----------------------------
 def get_gs_client_from_secrets():
     info = st.secrets.get("gcp_service_account")
     if not info:
@@ -311,7 +276,6 @@ def log_to_gsheet(input_df, preds):
         worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
         sh = client.open_by_key(sheet_key)
         ws = sh.worksheet(worksheet_name)
-
         row = input_df.iloc[0].tolist() + [str(preds)]
         ws.append_row(row)
         st.success("✅ Prediction logged to Google Sheets")
@@ -334,13 +298,9 @@ def read_from_gsheet(n=5):
     except Exception as e:
         return None, f"Error reading from Google Sheets: {str(e)}"
 
-
-# ===============================
+# -----------------------------
 # Input Method
-# ===============================
-# ===============================
-# Input Method
-# ===============================
+# -----------------------------
 input_method = st.radio("Choose input method", ["Manual Entry", "Upload CSV"])
 df_input = None
 
@@ -350,17 +310,11 @@ if input_method == "Manual Entry":
     input_dict = {}
     for feat in FEATURES:
         if feat in categorical_features:
-            # default "No"
             input_dict[feat] = st.selectbox(f"{feat}", ["No", "Yes"], index=0)
         else:
-            # default 0.0
             input_dict[feat] = st.number_input(f"{feat}", step=0.1, value=0.0, format="%.3f")
 
     if st.button("Predict (Manual)"):
-        # convert categorical Yes/No → 1/0
-        for col in categorical_features:
-            if col in input_dict:
-                input_dict[col] = 1 if input_dict[col] == "Yes" else 0
         df_input = pd.DataFrame([input_dict])
 
 elif input_method == "Upload CSV":
@@ -370,37 +324,26 @@ elif input_method == "Upload CSV":
             df_input = pd.read_csv(uploaded_file)
             st.write("Preview of uploaded file:")
             st.dataframe(df_input.head())
-            if st.button("Predict (CSV)"):
-                pass
         except Exception as e:
             st.error(f"❌ Could not read uploaded CSV: {e}")
             df_input = None
 
-# ===============================
-# Prediction
-# ===============================
-# ===============================
-# Prediction
-# ===============================
+# -----------------------------
+# Prediction Block
+# -----------------------------
 if df_input is not None and not df_input.empty:
     try:
-        # ✅ Preprocess input
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
         X_input = df_prepared.values
 
-        # 🔹 Ensemble model predictions
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
         mean_probs = all_probs.mean(axis=0)
         std_devs = all_probs.std(axis=0)
         entropy = calculate_entropy(mean_probs)
 
-        # ✅ Calibrate
         calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
-
-        # Final labels
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # Format output
         results_df = pd.DataFrame({
             "Predicted Label": predicted_labels,
             "Raw Probability": mean_probs,
@@ -409,19 +352,12 @@ if df_input is not None and not df_input.empty:
             "Entropy": entropy
         })
 
-        # ===========================
-        # Display results
-        # ===========================
         st.success("✅ Prediction Completed")
         st.subheader("📊 Prediction Result")
         st.dataframe(results_df)
 
-        # ===========================
-        # Google Sheets logging
-        # ===========================
         log_to_gsheet(df_input, predicted_labels)
 
-        # Show latest 5 rows from Google Sheets
         latest_rows, err = read_from_gsheet(n=5)
         if latest_rows is not None and latest_rows:
             st.info("📖 Last 5 rows in Google Sheets:")
