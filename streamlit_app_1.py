@@ -271,13 +271,8 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
     else:
         expected_features = features
 
-    # Add missing features with default 0
-    for col in expected_features:
-        if col not in df_proc.columns:
-            df_proc[col] = 0
-
-    # Keep only expected features, in correct order
-    df_proc = df_proc.reindex(columns=expected_features)
+    # ✅ Ensure all expected features exist, with default 0 if missing
+    df_proc = df_proc.reindex(columns=expected_features, fill_value=0)
 
     # Scale numeric only
     numeric_to_scale = [c for c in expected_features if c not in categorical_features]
@@ -289,6 +284,7 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
             st.stop()
 
     return df_proc
+
 # Google Sheets Integration
 # ===============================
 def get_gs_client_from_secrets():
