@@ -227,6 +227,9 @@ categorical_features = set([
 # ===============================
 # Preprocessing Function (Fixed)
 # ===============================
+# -----------------------------
+# Preprocessing Function (Amended)
+# -----------------------------
 def preprocess_input(df: pd.DataFrame, features: list, scaler):
     """
     Preprocess user input to match model training features:
@@ -237,10 +240,10 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
     """
     df_proc = df.copy()
 
-    # Convert Yes/No etc.
+    # Map Yes/No or similar categorical values
     yes_no_map = {"Yes": 1, "No": 0, "Y": 1, "N": 0, "y": 1, "n": 0, 1: 1, 0: 0, "1": 1, "0": 0}
 
-    # Use global categorical_features safely
+    # Use global categorical_features set
     global categorical_features
 
     # Encode categorical columns
@@ -248,26 +251,28 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
         if col in df_proc.columns:
             df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    # Add any missing columns
+    # Add any missing columns with 0
     for feat in features:
         if feat not in df_proc.columns:
             df_proc[feat] = 0
 
-    # Ensure correct feature order
+    # Reorder columns exactly as in features list
     df_proc = df_proc[features]
 
-    # Identify numeric columns for scaling
+    # Identify numeric features to scale
     numeric_cols = [c for c in features if c not in categorical_features]
 
-    # Apply scaling
+    # Apply scaling using array input (avoids feature_names mismatch)
     if numeric_cols:
         try:
-            df_proc[numeric_cols] = scaler.transform(df_proc[numeric_cols])
+            df_proc[numeric_cols] = scaler.transform(df_proc[numeric_cols].values)
         except Exception as e:
+            import streamlit as st
             st.error(f"❌ Scaling error: {e}")
             st.stop()
 
     return df_proc
+
 # -----------------------------
 # Google Sheets Integration
 # -----------------------------
@@ -353,29 +358,32 @@ elif input_method == "Upload CSV":
 # -----------------------------
 # Prediction Block (Amended)
 # -----------------------------
+# -----------------------------
+# Prediction Block (Amended & Ready)
+# -----------------------------
 if df_input is not None and not df_input.empty:
     try:
-        # Preprocess input
+        # 1️⃣ Preprocess input
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
         X_input = df_prepared.values
 
-        # ----- Shape check -----
+        # 2️⃣ Shape check
         expected_features_count = len(FEATURES)
         if X_input.shape[1] != expected_features_count:
             st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
             st.stop()
 
-        # Ensemble predictions
+        # 3️⃣ Ensemble predictions
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
         mean_probs = all_probs.mean(axis=0)
         std_devs = all_probs.std(axis=0)
         entropy = calculate_entropy(mean_probs)
 
-        # Calibration
+        # 4️⃣ Calibration
         calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # Results DataFrame
+        # 5️⃣ Results DataFrame
         results_df = pd.DataFrame({
             "Predicted Label": predicted_labels,
             "Raw Probability": mean_probs,
@@ -388,10 +396,10 @@ if df_input is not None and not df_input.empty:
         st.subheader("📊 Prediction Result")
         st.dataframe(results_df)
 
-        # Log to Google Sheets
+        # 6️⃣ Log to Google Sheets
         log_to_gsheet(df_input, predicted_labels)
 
-        # Show latest entries from Google Sheets
+        # 7️⃣ Show latest entries from Google Sheets
         latest_rows, err = read_from_gsheet(n=5)
         if latest_rows is not None and latest_rows:
             st.info("📖 Last 5 rows in Google Sheets:")
