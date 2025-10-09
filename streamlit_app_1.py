@@ -227,22 +227,28 @@ categorical_features = set([
 # ===============================
 # Preprocessing Function (Fixed)
 # ===============================
-def preprocess_input(df: pd.DataFrame, features: list, scaler, categorical_features: list):
+def preprocess_input(df: pd.DataFrame, features: list, scaler):
+    """
+    Preprocess user input to match model training features:
+      - Convert categorical values (Yes/No → 1/0)
+      - Add missing features with default 0
+      - Reorder features as in training
+      - Apply scaling to numeric features
+    """
     df_proc = df.copy()
-    yes_no_map = {"Yes":1,"No":0,"Y":1,"N":0,"y":1,"n":0,1:1,0:0,"1":1,"0":0}
 
-    # Map categorical features
+    yes_no_map = {"Yes":1, "No":0, "Y":1, "N":0, "y":1, "n":0, 1:1, 0:0, "1":1, "0":0}
+
+    # Map categorical variables globally (categorical_features is global)
     for col in categorical_features:
         if col in df_proc.columns:
             df_proc[col] = df_proc[col].map(yes_no_map).fillna(0).astype(int)
 
-    # Always use the same feature ordering from feature_names.pkl
+    # Ensure all expected features exist and in correct order
     expected_features = features
-
-    # Align input dataframe with expected feature list
     df_proc = df_proc.reindex(columns=expected_features, fill_value=0)
 
-    # Scale only numeric features (non-categorical)
+    # Scale only numeric features
     numeric_to_scale = [c for c in expected_features if c not in categorical_features]
     if numeric_to_scale:
         try:
@@ -252,9 +258,6 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler, categorical_featu
             st.stop()
 
     return df_proc
-
-
-
 # -----------------------------
 # Google Sheets Integration
 # -----------------------------
