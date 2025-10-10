@@ -290,35 +290,63 @@ def get_gs_client_from_secrets():
     except Exception as e:
         return None, f"Error creating Google Sheets client: {str(e)}"
 
+import streamlit as st
+
 def log_to_gsheet(input_df, preds):
+    """Append one prediction row to Google Sheet."""
     client, err = get_gs_client_from_secrets()
     if client is None:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
         return
+
     try:
-        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
-        worksheet_name = st.secrets.get("gsheet_worksheet_streamlit_app_1", "predictions")
+        # ✅ Fixed: using correct key names
+        sheet_key = st.secrets["gsheet_key_streamlit_app_1"]
+        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+
+        # Debug info
+        st.write("📝 Using worksheet:", worksheet_name)
+
         sh = client.open_by_key(sheet_key)
         ws = sh.worksheet(worksheet_name)
+
+        # Prepare row from input dataframe + prediction
         row = input_df.iloc[0].tolist() + [str(preds)]
         ws.append_row(row)
+
         st.success("✅ Prediction logged to Google Sheets")
+
+        # ✅ Show last 5 logged entries
+        last_rows, err = read_from_gsheet(n=5)
+        if last_rows:
+            st.write("📊 **Last 5 entries in Google Sheet:**")
+            st.dataframe(last_rows)
+        elif err:
+            st.warning(f"⚠️ Could not read back rows: {err}")
+
     except Exception as e:
         st.error(f"❌ Failed to log to Google Sheet: {e}")
 
+
 def read_from_gsheet(n=5):
+    """Read the last n rows from Google Sheet."""
     client, err = get_gs_client_from_secrets()
     if client is None:
         return None, f"Google Sheets client error: {err}"
+
     try:
-        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
-        worksheet_name = st.secrets.get("gsheet_worksheet_streamlit_app_1", "predictions")
+        sheet_key = st.secrets["gsheet_key_streamlit_app_1"]
+        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
         sh = client.open_by_key(sheet_key)
         ws = sh.worksheet(worksheet_name)
         all_values = ws.get_all_values()
+
         if not all_values:
             return [], None
+
+        # Return last n rows
         return all_values[-n:], None
+
     except Exception as e:
         return None, f"Error reading from Google Sheets: {str(e)}"
 
