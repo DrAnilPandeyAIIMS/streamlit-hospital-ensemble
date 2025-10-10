@@ -296,8 +296,8 @@ def log_to_gsheet(input_df, preds):
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
         return
     try:
-        sheet_key = st.secrets.get("gsheet_key")
-        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
+        worksheet_name = st.secrets.get("gsheet_worksheet_streamlit_app_1", "predictions")
         sh = client.open_by_key(sheet_key)
         ws = sh.worksheet(worksheet_name)
         row = input_df.iloc[0].tolist() + [str(preds)]
@@ -311,8 +311,8 @@ def read_from_gsheet(n=5):
     if client is None:
         return None, f"Google Sheets client error: {err}"
     try:
-        sheet_key = st.secrets.get("gsheet_key")
-        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
+        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
+        worksheet_name = st.secrets.get("gsheet_worksheet_streamlit_app_1", "predictions")
         sh = client.open_by_key(sheet_key)
         ws = sh.worksheet(worksheet_name)
         all_values = ws.get_all_values()
