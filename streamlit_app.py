@@ -699,7 +699,7 @@ if uploaded_file is not None:
 st.subheader("📋 Enter Patient Data Manually")
 
 # Define categorical (binary) features
-categorical_features = [
+categorical_features = set([
     "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
     "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
     "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
@@ -709,10 +709,14 @@ categorical_features = [
     "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
     "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
     "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
-]
+])
 
 # Ensure feature names are clean
 feature_names = [f.strip() for f in feature_names]
+
+st.subheader("debug")
+for feature in feature_names:
+    st.write(f"{feature = }")
 
 with st.form("manual_form"):
     manual_data = {}
