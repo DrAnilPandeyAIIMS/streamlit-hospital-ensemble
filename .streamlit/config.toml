@@ -1,4 +1,5 @@
 [server]
 headless = true
+port = 8500
 enableCORS = false
-fileWatcherType = "none"
+
