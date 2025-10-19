@@ -1,4 +1,4 @@
-# streamlit_app_1.py
+# streamlit_app_2.py
 import os
 import json
 import warnings
@@ -83,10 +83,28 @@ class DenseFlipoutLayer(tf.keras.layers.Layer):
         )
     def call(self, inputs):
         return self.dense_flipout(inputs)
+import tensorflow as tf
+import tensorflow_probability as tfp
 
+tfd = tfp.distributions
+
+# ✅ Standard negative log-likelihood for Bernoulli outputs
+def negative_log_likelihood_bernoulli(y_true, y_pred):
+    return -tf.reduce_mean(
+        y_true * tf.math.log(y_pred + 1e-9) +
+        (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
+    )
+
+# ✅ Generic NLL for probabilistic (distribution) outputs
 def negative_log_likelihood(y_true, y_pred_dist):
-    """Custom loss for probabilistic output models."""
+    """
+    y_pred_dist is a Distribution object (e.g., Bernoulli, Normal, etc.)
+    This computes the mean negative log-likelihood.
+    """
     return -y_pred_dist.log_prob(y_true)
+
+# ✅ Register both custom losses for model loading
+
 
 # Register only necessary objects for Flipout models
 custom_objects = {
@@ -94,6 +112,7 @@ custom_objects = {
     "DenseFlipout": tfp.layers.DenseFlipout,
     "DistributionLambda": tfp.layers.DistributionLambda,
     "negative_log_likelihood": negative_log_likelihood,
+    "negative_log_likelihood_bernoulli": negative_log_likelihood_bernoulli,
 }
 
 # -----------------------------
