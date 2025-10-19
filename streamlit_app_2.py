@@ -418,11 +418,11 @@ if df_input is not None and not df_input.empty:
         st.subheader("📊 Prediction Result")
         st.dataframe(results_df)
 
-        # 6️⃣ Log to Google Sheets
-        log_to_gsheet(df_input, predicted_labels)
+        # 6️⃣ Log to Google Sheets (App 2)
+        log_to_gsheet_app2(df_input, predicted_labels)
 
-        # 7️⃣ Show latest entries from Google Sheets
-        latest_rows, err = read_from_gsheet(n=5)
+        # 7️⃣ Show latest entries from Google Sheets (App 2)
+        latest_rows, err = read_from_gsheet_app2(n=5)
         if latest_rows is not None and latest_rows:
             st.info("📖 Last 5 rows in Google Sheets:")
             st.dataframe(pd.DataFrame(latest_rows))
