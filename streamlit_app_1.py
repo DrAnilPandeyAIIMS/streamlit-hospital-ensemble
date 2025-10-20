@@ -276,23 +276,49 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
 # -----------------------------
 # Google Sheets Integration
 # -----------------------------
+# -----------------------------
+# Google Sheets Integration (Unified)
+# -----------------------------
 def get_gs_client_from_secrets():
-    info = st.secrets.get("gcp_service_account")
-    if not info:
-        return None, "No gcp_service_account found in st.secrets"
+    """Authorize Google Sheets client using service account from st.secrets"""
     try:
+        creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(
-            info,
+            creds_dict,
             scopes=["https://www.googleapis.com/auth/spreadsheets"]
         )
         client = gspread.authorize(creds)
         return client, None
     except Exception as e:
-        return None, f"Error creating Google Sheets client: {str(e)}"
+        return None, str(e)
+
+
+def get_sheet_info():
+    """
+    Dynamically select the correct GSheet key & worksheet name based on app.
+    Detects automatically using Streamlit's page title or fallback.
+    """
+    page_title = st.get_option("page_title") or "streamlit_app_1"
+    
+    if "app_1" in page_title.lower():
+        return (
+            st.secrets.get("gsheet_key_streamlit_app_1"),
+            st.secrets.get("gsheet_worksheet_app_1", "predictions")
+        )
+    elif "app_2" in page_title.lower():
+        return (
+            st.secrets.get("gsheet_key_streamlit_app_2"),
+            st.secrets.get("gsheet_worksheet_app_2", "predictions_app_2")
+        )
+    else:
+        return (
+            st.secrets.get("gsheet_key_streamlit_app"),
+            st.secrets.get("gsheet_worksheet", "streamlit_project Data")
+        )
 
 
 def ensure_worksheet_exists(sh, worksheet_name):
-    """Create worksheet if it does not exist"""
+    """Ensure worksheet exists or create a new one."""
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.exceptions.WorksheetNotFound:
@@ -302,35 +328,33 @@ def ensure_worksheet_exists(sh, worksheet_name):
 
 
 def log_to_gsheet(input_df, preds):
+    """Append a row of input and prediction results to Google Sheet."""
     client, err = get_gs_client_from_secrets()
     if client is None:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
         return
 
     try:
-        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
-        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
-
+        sheet_key, worksheet_name = get_sheet_info()
         sh = client.open_by_key(sheet_key)
         ws = ensure_worksheet_exists(sh, worksheet_name)
 
         row = input_df.iloc[0].tolist() + [str(preds)]
         ws.append_row(row)
-        st.success("✅ Prediction logged to Google Sheets")
+        st.success(f"✅ Prediction logged to Google Sheets ({worksheet_name})")
 
     except Exception as e:
         st.error(f"❌ Failed to log to Google Sheet: {e}")
 
 
 def read_from_gsheet(n=5):
+    """Read last n rows from Google Sheet."""
     client, err = get_gs_client_from_secrets()
     if client is None:
         return None, f"Google Sheets client error: {err}"
 
     try:
-        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
-        worksheet_name = st.secrets.get("gsheet_worksheet", "predictions")
-
+        sheet_key, worksheet_name = get_sheet_info()
         sh = client.open_by_key(sheet_key)
         ws = ensure_worksheet_exists(sh, worksheet_name)
 
