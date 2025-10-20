@@ -643,32 +643,56 @@ if uploaded_file is not None:
     input_array = input_df.values
 
     # Predict ensemble
+    # -----------------------------
+        # 3️⃣ Predict ensemble
+        # -----------------------------
     all_probs = ensemble_models_predict_all(input_array)
     mean_probs = np.mean(all_probs, axis=0)      # 1D
     mean_probs = ensure_single_output(mean_probs)
-    std_devs = np.std(all_probs, axis=0)         # 1D
-    entropy = calculate_entropy(mean_probs)      # 1D
+    std_devs_raw = np.std(all_probs, axis=0)     # 1D
+    entropy_raw = calculate_entropy(mean_probs)  # 1D
 
-    # Calibrate probabilities
+    # -----------------------------
+    # 4️⃣ Calibrate probabilities
+        # -----------------------------
     try:
         calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
     except Exception:
         calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
 
+    # -----------------------------
+    # 5️⃣ Calibrated uncertainties
+    # -----------------------------
+    all_calibrated_probs = np.array([
+        iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
+    ])
+    std_devs_cal = np.std(all_calibrated_probs, axis=0)
+    entropy_cal = calculate_entropy(np.mean(all_calibrated_probs, axis=0))
+
+    # -----------------------------
+    # 6️⃣ Threshold & predicted labels
+    # -----------------------------
     predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-    # Construct results DataFrame
-    results_df = input_df.copy()
+    # -----------------------------
+    # 7️⃣ Construct results DataFrame
+    # -----------------------------
+    results_df = df_input.copy()
     results_df["raw_probability"] = mean_probs
     results_df["calibrated_probability"] = calibrated_probs
     results_df["predicted_label"] = predicted_labels
-    results_df["std_deviation"] = std_devs
-    results_df["entropy"] = entropy
+    results_df["std_deviation_raw"] = std_devs_raw
+    results_df["std_deviation_calibrated"] = std_devs_cal
+    results_df["entropy_raw"] = entropy_raw
+    results_df["entropy_calibrated"] = entropy_cal
 
-    st.subheader("Prediction Results")
+    # -----------------------------
+    # 8️⃣ Display in Streamlit
+    # -----------------------------
+    st.subheader("📊 Prediction Results")
     st.dataframe(results_df)
 
-    # Save to Google Sheets
+     # Save to Google Sheets
     ok, err = append_to_gsheet(results_df)
     if ok:
         st.success("✅ Saved prediction to Google Sheets.")
