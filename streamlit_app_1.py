@@ -276,11 +276,18 @@ def preprocess_input(df: pd.DataFrame, features: list, scaler):
 # -----------------------------
 # Google Sheets Integration
 # -----------------------------
+<<<<<<< Updated upstream
 # -----------------------------
 # Google Sheets Integration (Unified)
 # -----------------------------
 def get_gs_client_from_secrets():
     """Authorize Google Sheets client using service account from st.secrets"""
+=======
+def get_gs_client_from_secrets_app1():
+    info = st.secrets.get("gcp_service_account")
+    if not info:
+        return None, "No gcp_service_account found in st.secrets"
+>>>>>>> Stashed changes
     try:
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(
@@ -327,15 +334,25 @@ def ensure_worksheet_exists(sh, worksheet_name):
     return ws
 
 
+<<<<<<< Updated upstream
 def log_to_gsheet(input_df, preds):
     """Append a row of input and prediction results to Google Sheet."""
+=======
+def log_to_gsheet_app1(input_df, preds):
+>>>>>>> Stashed changes
     client, err = get_gs_client_from_secrets()
     if client is None:
         st.warning(f"⚠️ Could not save to Google Sheets: {err}")
         return
 
     try:
+<<<<<<< Updated upstream
         sheet_key, worksheet_name = get_sheet_info()
+=======
+        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
+        worksheet_name = st.secrets.get("gsheet_worksheet_app_1", "predictions")
+
+>>>>>>> Stashed changes
         sh = client.open_by_key(sheet_key)
         ws = ensure_worksheet_exists(sh, worksheet_name)
 
@@ -354,7 +371,13 @@ def read_from_gsheet(n=5):
         return None, f"Google Sheets client error: {err}"
 
     try:
+<<<<<<< Updated upstream
         sheet_key, worksheet_name = get_sheet_info()
+=======
+        sheet_key = st.secrets.get("gsheet_key_streamlit_app_1")
+        worksheet_name = st.secrets.get("gsheet_worksheet_app_1", "predictions")
+
+>>>>>>> Stashed changes
         sh = client.open_by_key(sheet_key)
         ws = ensure_worksheet_exists(sh, worksheet_name)
 
@@ -407,44 +430,78 @@ elif input_method == "Upload CSV":
 # -----------------------------
 if df_input is not None and not df_input.empty:
     try:
+        # -----------------------------
         # 1️⃣ Preprocess input
+        # -----------------------------
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
         X_input = df_prepared.values
 
+        # -----------------------------
         # 2️⃣ Shape check
+        # -----------------------------
         expected_features_count = len(FEATURES)
         if X_input.shape[1] != expected_features_count:
             st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
             st.stop()
 
-        # 3️⃣ Ensemble predictions
+        # -----------------------------
+        # 3️⃣ Predict ensemble
+        # -----------------------------
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
-        mean_probs = all_probs.mean(axis=0)
-        std_devs = all_probs.std(axis=0)
-        entropy = calculate_entropy(mean_probs)
+        mean_probs = np.mean(all_probs, axis=0)      # 1D
+        mean_probs = ensure_single_output(mean_probs)
+        std_devs_raw = np.std(all_probs, axis=0)     # 1D
+        entropy_raw = calculate_entropy(mean_probs)  # 1D
 
-        # 4️⃣ Calibration
-        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+        # -----------------------------
+        # 4️⃣ Calibrate probabilities
+        # -----------------------------
+        try:
+            calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+        except Exception:
+            calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
+
+        # -----------------------------
+        # 5️⃣ Calibrated uncertainties
+        # -----------------------------
+        all_calibrated_probs = np.array([
+            iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
+        ])
+        std_devs_cal = np.std(all_calibrated_probs, axis=0)
+        entropy_cal = calculate_entropy(np.mean(all_calibrated_probs, axis=0))
+
+        # -----------------------------
+        # 6️⃣ Threshold & predicted labels
+        # -----------------------------
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # 5️⃣ Results DataFrame
-        results_df = pd.DataFrame({
-            "Predicted Label": predicted_labels,
-            "Raw Probability": mean_probs,
-            "Calibrated Probability": calibrated_probs,
-            "Std Dev": std_devs,
-            "Entropy": entropy
-        })
+        # -----------------------------
+        # 7️⃣ Construct results DataFrame
+        # -----------------------------
+        results_df = df_input.copy()
+        results_df["raw_probability"] = mean_probs
+        results_df["calibrated_probability"] = calibrated_probs
+        results_df["predicted_label"] = predicted_labels
+        results_df["std_deviation_raw"] = std_devs_raw
+        results_df["std_deviation_calibrated"] = std_devs_cal
+        results_df["entropy_raw"] = entropy_raw
+        results_df["entropy_calibrated"] = entropy_cal
 
-        st.success("✅ Prediction Completed")
-        st.subheader("📊 Prediction Result")
+        # -----------------------------
+        # 8️⃣ Display in Streamlit
+        # -----------------------------
+        st.subheader("📊 Prediction Results")
         st.dataframe(results_df)
 
-        # 6️⃣ Log to Google Sheets
+        # -----------------------------
+        # 9️⃣ Log to Google Sheets
+        # -----------------------------
         log_to_gsheet(df_input, predicted_labels)
 
-        # 7️⃣ Show latest entries from Google Sheets
-        latest_rows, err = read_from_gsheet(n=5)
+        # -----------------------------
+        # 🔟 Show latest entries from Google Sheets
+        # -----------------------------
+        latest_rows, err = read_from_gsheet_app_1(n=5)
         if latest_rows is not None and latest_rows:
             st.info("📖 Last 5 rows in Google Sheets:")
             st.dataframe(pd.DataFrame(latest_rows))
