@@ -385,38 +385,65 @@ elif input_method == "Upload CSV":
 # -----------------------------
 if df_input is not None and not df_input.empty:
     try:
+        # -----------------------------
         # 1️⃣ Preprocess input
+         # -----------------------------
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
         X_input = df_prepared.values
 
+        # -----------------------------
         # 2️⃣ Shape check
+        # -----------------------------
         expected_features_count = len(FEATURES)
         if X_input.shape[1] != expected_features_count:
             st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
             st.stop()
 
-        # 3️⃣ Ensemble predictions
+        # -----------------------------
+        # 3️⃣ Predict ensemble
+        # -----------------------------
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
-        mean_probs = all_probs.mean(axis=0)
-        std_devs = all_probs.std(axis=0)
-        entropy = calculate_entropy(mean_probs)
+        mean_probs = np.mean(all_probs, axis=0)      # 1D
+        mean_probs = ensure_single_output(mean_probs)
+        std_devs_raw = np.std(all_probs, axis=0)     # 1D
+        entropy_raw = calculate_entropy(mean_probs)  # 1D
+        # 4️⃣ Calibrate probabilities
+        # -----------------------------
+        try:
+            calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+        except Exception:
+            calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
 
-        # 4️⃣ Calibration
-        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+        # -----------------------------
+        # 5️⃣ Calibrated uncertainties
+        # -----------------------------
+        all_calibrated_probs = np.array([
+            iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
+        ])
+        std_devs_cal = np.std(all_calibrated_probs, axis=0)
+        entropy_cal = calculate_entropy(np.mean(all_calibrated_probs, axis=0))
+
+        # -----------------------------
+        # 6️⃣ Threshold & predicted labels
+        # -----------------------------
         predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # 5️⃣ Results DataFrame
-        results_df = pd.DataFrame({
-            "Predicted Label": predicted_labels,
-            "Raw Probability": mean_probs,
-            "Calibrated Probability": calibrated_probs,
-            "Std Dev": std_devs,
-            "Entropy": entropy
-        })
-
-        st.success("✅ Prediction Completed")
-        st.subheader("📊 Prediction Result")
+        # -----------------------------
+        # 7️⃣ Construct results DataFrame
+        # -----------------------------
+        results_df = df_input.copy()
+        results_df["raw_probability"] = mean_probs
+        results_df["calibrated_probability"] = calibrated_probs
+        results_df["predicted_label"] = predicted_labels
+        results_df["std_deviation_raw"] = std_devs_raw
+        results_df["std_deviation_calibrated"] = std_devs_cal
+        results_df["entropy_raw"] = entropy_raw
+        results_df["entropy_calibrated"] = entropy_cal
+        # 8️⃣ Display in Streamlit
+        # -----------------------------
+        st.subheader("📊 Prediction Results")
         st.dataframe(results_df)
+    
 
         # 6️⃣ Log to Google Sheets (App 2)
         log_to_gsheet_app2(df_input, predicted_labels)
