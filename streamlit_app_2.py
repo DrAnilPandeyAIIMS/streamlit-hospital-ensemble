@@ -374,87 +374,168 @@ elif input_method == "Upload CSV":
             st.error(f"❌ Could not read uploaded CSV: {e}")
             df_input = None
 
-# -----------------------------
-# Prediction Block
-# -----------------------------
-# -----------------------------
-# Prediction Block (Amended)
-# -----------------------------
-# -----------------------------
-# Prediction Block (Amended & Ready)
-# -----------------------------
+
+# ================================
+# 🔹 INPUT SECTION
+# ================================
+input_method = st.radio("Choose input method", ["Manual Entry", "Upload CSV"])
+df_input = None
+
+if input_method == "Manual Entry":
+    st.info("All features have defaults. Change only the relevant ones.")
+    input_dict = {}
+
+    for feat in FEATURES:
+        if feat in categorical_features:
+            input_dict[feat] = st.selectbox(f"{feat}", ["No", "Yes"], index=0)
+        else:
+            input_dict[feat] = st.number_input(f"{feat}", step=0.1, value=0.0, format="%.3f")
+
+    if st.button("Predict (Manual)"):
+        df_input = pd.DataFrame([input_dict])
+
+elif input_method == "Upload CSV":
+    uploaded_file = st.file_uploader("Upload CSV", type="csv")
+    if uploaded_file is not None:
+        try:
+            df_input = pd.read_csv(uploaded_file)
+            st.write("✅ Preview of uploaded file:")
+            st.dataframe(df_input.head())
+        except Exception as e:
+            st.error(f"❌ Could not read uploaded CSV: {e}")
+            df_input = None
+
+
+# ================================
+# 🔹 PREDICTION SECTION
+# ================================
 if df_input is not None and not df_input.empty:
+
+    # -----------------------------
+    # 1️⃣ Preprocess Input
+    # -----------------------------
     try:
-        # -----------------------------
-        # 1️⃣ Preprocess input
-         # -----------------------------
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
         X_input = df_prepared.values
+    except Exception as e:
+        st.error(f"❌ Preprocessing failed: {e}")
+        st.stop()
 
-        # -----------------------------
-        # 2️⃣ Shape check
-        # -----------------------------
-        expected_features_count = len(FEATURES)
-        if X_input.shape[1] != expected_features_count:
-            st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
-            st.stop()
+    # -----------------------------
+    # 2️⃣ Validate Feature Shape
+    # -----------------------------
+    expected_features_count = len(FEATURES)
+    if X_input.shape[1] != expected_features_count:
+        st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
+        st.stop()
 
-        # -----------------------------
-        # 3️⃣ Predict ensemble
-        # -----------------------------
+    # -----------------------------
+    # Helper: Ensure single-column probabilities
+    # -----------------------------
+    def ensure_single_output(prob_array):
+        """
+        Ensures the model output is a 1D array of probabilities for the positive class.
+        If model outputs 2D array, uses the last column.
+        """
+        prob_array = np.asarray(prob_array)
+        if prob_array.ndim > 1:
+            prob_array = prob_array[:, -1]
+        return prob_array
+
+    # -----------------------------
+    # 3️⃣ Ensemble Prediction
+    # -----------------------------
+    try:
         all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
-        mean_probs = np.mean(all_probs, axis=0)      # 1D
+        mean_probs = np.mean(all_probs, axis=0)
         mean_probs = ensure_single_output(mean_probs)
-        std_devs_raw = np.std(all_probs, axis=0)     # 1D
-        entropy_raw = calculate_entropy(mean_probs)  # 1D
-        # 4️⃣ Calibrate probabilities
-        # -----------------------------
-        try:
-            calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
-        except Exception:
-            calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
+        std_devs_raw = np.std(all_probs, axis=0)
+        entropy_raw = calculate_entropy(mean_probs)
+    except Exception as e:
+        st.error(f"❌ Ensemble prediction failed: {e}")
+        st.stop()
 
-        # -----------------------------
-        # 5️⃣ Calibrated uncertainties
-        # -----------------------------
+    # -----------------------------
+    # 4️⃣ Calibration
+    # -----------------------------
+    try:
+        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+    except Exception:
+        try:
+            calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
+        except Exception as e:
+            st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
+            calibrated_probs = mean_probs
+
+    # -----------------------------
+    # 5️⃣ Calibrated Uncertainties
+    # -----------------------------
+    try:
         all_calibrated_probs = np.array([
             iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
         ])
         std_devs_cal = np.std(all_calibrated_probs, axis=0)
         entropy_cal = calculate_entropy(np.mean(all_calibrated_probs, axis=0))
+    except Exception:
+        std_devs_cal = std_devs_raw
+        entropy_cal = entropy_raw
 
-        # -----------------------------
-        # 6️⃣ Threshold & predicted labels
-        # -----------------------------
-        predicted_labels = (calibrated_probs >= best_threshold).astype(int)
+    # -----------------------------
+    # 6️⃣ Apply Best Threshold
+    # -----------------------------
+    predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-        # -----------------------------
-        # 7️⃣ Construct results DataFrame
-        # -----------------------------
-        results_df = df_input.copy()
-        results_df["raw_probability"] = mean_probs
-        results_df["calibrated_probability"] = calibrated_probs
-        results_df["predicted_label"] = predicted_labels
-        results_df["std_deviation_raw"] = std_devs_raw
-        results_df["std_deviation_calibrated"] = std_devs_cal
-        results_df["entropy_raw"] = entropy_raw
-        results_df["entropy_calibrated"] = entropy_cal
-        # 8️⃣ Display in Streamlit
-        # -----------------------------
-        st.subheader("📊 Prediction Results")
-        st.dataframe(results_df)
-    
+    # -----------------------------
+    # 7️⃣ Build Results DataFrame
+    # -----------------------------
+    results_df = df_input.copy()
+    results_df["raw_probability"] = mean_probs
+    results_df["calibrated_probability"] = calibrated_probs
+    results_df["predicted_label"] = predicted_labels
+    results_df["std_deviation_raw"] = std_devs_raw
+    results_df["std_deviation_calibrated"] = std_devs_cal
+    results_df["entropy_raw"] = entropy_raw
+    results_df["entropy_calibrated"] = entropy_cal
 
-        # 6️⃣ Log to Google Sheets (App 2)
+    # -----------------------------
+    # 8️⃣ Display Results
+    # -----------------------------
+    st.subheader("📊 Prediction Results")
+    st.dataframe(results_df)
+
+    # -----------------------------
+    # 9️⃣ Log to Google Sheets
+    # -----------------------------
+    try:
         log_to_gsheet_app2(df_input, predicted_labels)
-
-        # 7️⃣ Show latest entries from Google Sheets (App 2)
-        latest_rows, err = read_from_gsheet_app2(n=5)
-        if latest_rows is not None and latest_rows:
-            st.info("📖 Last 5 rows in Google Sheets:")
-            st.dataframe(pd.DataFrame(latest_rows))
-        else:
-            st.warning(f"⚠️ Could not read back from Google Sheets: {err}")
-
+        st.success("✅ Logged to Google Sheets successfully.")
     except Exception as e:
-        st.error(f"❌ Prediction failed: {e}")
+        st.warning(f"⚠️ Logging to Google Sheets failed: {e}")
+
+    # -----------------------------
+    # 🔟 Show Latest Entries
+    # -----------------------------
+    # Safely show last rows from Google Sheets (works if helper returns list, DataFrame, or empty)
+latest_rows, err = read_from_gsheet_app2(n=5)
+if latest_rows is None:
+    st.warning(f"⚠️ Could not read from Google Sheets: {err}")
+else:
+    # If it's a DataFrame already
+    if isinstance(latest_rows, pd.DataFrame):
+        df_latest = latest_rows
+    else:
+        # If it's a list of lists or list of records, convert defensively to DataFrame
+        try:
+            df_latest = pd.DataFrame(latest_rows)
+            # If first row looks like a header row (all strings) and has same length as columns in results_df,
+            # optionally treat it as header. Keep simple: if df has 0 columns, make it empty DataFrame
+            if df_latest.shape[1] == 0:
+                df_latest = pd.DataFrame()
+        except Exception:
+            df_latest = pd.DataFrame()
+
+    if not df_latest.empty:
+        st.info("📖 Last rows in Google Sheets:")
+        st.dataframe(df_latest)
+    else:
+        st.warning("⚠️ Google Sheet returned no recent rows.")
