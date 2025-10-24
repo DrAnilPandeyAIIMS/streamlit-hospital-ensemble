@@ -371,6 +371,17 @@ try:
 except Exception as e:
     st.error(f"❌ Could not load feature_names.pkl. Error: {e}")
     st.stop()
+categorical_features = set([
+    "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
+    "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
+    "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
+    "Herniotomy", "Lithotomy", "Pyeloplasty", "Appendicectomy", "Omentoplasty",
+    "SmallBowelResection", "Laproscopic LysisOfAdhesions", "MRM",
+    "Hysterectomy", "Prostectomy", "DiagLaprot", "Nephrectomy", "Gastrectomy",
+    "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
+    "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
+    "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
+])
 
 @st.cache_resource
 def load_iso_reg():
@@ -606,41 +617,41 @@ uploaded_file = st.file_uploader("Upload Patient CSV File", type=["csv"])
 
 if uploaded_file is not None:
     try:
-        input_df = pd.read_csv(uploaded_file)
+        df_input=pd.read_csv(uploaded_file)
     except Exception as e:
         st.error(f"❌ Could not read CSV: {e}")
         st.stop()
 
     st.write("Uploaded Data:")
-    st.dataframe(input_df)
+    st.dataframe(df_input)
 
     # Warn about extra columns
-    extra_cols = [c for c in input_df.columns if c not in feature_names]
+    extra_cols = [c for c in df_input.columns if c not in feature_names]
     if extra_cols:
         st.warning(f"⚠️ Extra columns ignored: {extra_cols}")
 
     # Add missing columns and reorder
     for col in feature_names:
-        if col not in input_df.columns:
-            input_df[col] = 0.0
-    input_df = input_df[feature_names].fillna(0.0)
+        if col not in df_input.columns:
+            df_input[col] = 0.0
+    df_input = df_input[feature_names].fillna(0.0)
 
     # Scale numeric features
     try:
-        df_scaled = input_df.copy()
+        df_scaled = df_input.copy()
         numeric_to_scale = [
             col for col in scaler_features 
             if col in df_scaled.columns and col not in categorical_features
         ]
         if numeric_to_scale:
             df_scaled[numeric_to_scale] = scaler.transform(df_scaled[numeric_to_scale])
-        input_df = df_scaled
+        df_input = df_scaled
     except Exception as e:
         st.error(f"❌ Scaling error: {e}")
         st.stop()
 
     # Convert to array
-    input_array = input_df.values
+    input_array = df_input.values
 
     # Predict ensemble
     # -----------------------------
@@ -723,17 +734,6 @@ if uploaded_file is not None:
 st.subheader("📋 Enter Patient Data Manually")
 
 # Define categorical (binary) features
-categorical_features = set([
-    "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
-    "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
-    "ChroLiverDis", "Hemiplegia", "LapCholi", "OpenCholi", "Hernioplasty",
-    "Herniotomy", "Lithotomy", "Pyeloplasty", "Appendicectomy", "Omentoplasty",
-    "SmallBowelResection", "Laproscopic LysisOfAdhesions", "MRM",
-    "Hysterectomy", "Prostectomy", "DiagLaprot", "Nephrectomy", "Gastrectomy",
-    "Oesophagotomy", "UnimpDis_LAMA", "SuperficialSSI", "DeepSurgicalSSI",
-    "OrganSpaceSSI", "Dehiscence", "GastricOutletObs", "GeneralisedPeritonitis",
-    "pul_Complications", "c_Complication", "UTI", "Sepsis", "reoperation", "Readm"
-])
 
 # Ensure feature names are clean
 feature_names = [f.strip() for f in feature_names]
