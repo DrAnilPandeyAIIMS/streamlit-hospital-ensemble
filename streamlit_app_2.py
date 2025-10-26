@@ -362,27 +362,40 @@ except Exception:
 # -----------------------------
 # 6️⃣ Apply best threshold
 # -----------------------------
+# -----------------------------
+# 7️⃣ Build Results DataFrame
+# -----------------------------
 predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-    results_df = df_input.copy()
-    results_df["raw_probability"] = mean_probs
-    results_df["calibrated_probability"] = calibrated_probs
-    results_df["predicted_label"] = predicted_labels
-    results_df["std_deviation_raw"] = std_devs_raw
-    results_df["std_deviation_calibrated"] = std_devs_cal
-    results_df["entropy_raw"] = entropy_raw
-    results_df["entropy_calibrated"] = entropy_cal
+results_df = df_input.copy()
+results_df["raw_probability"] = mean_probs
+results_df["calibrated_probability"] = calibrated_probs
+results_df["predicted_label"] = predicted_labels
+results_df["std_deviation_raw"] = std_devs_raw
+results_df["std_deviation_calibrated"] = std_devs_cal
+results_df["entropy_raw"] = entropy_raw
+results_df["entropy_calibrated"] = entropy_cal
 
-    st.subheader("📊 Prediction Results")
-    st.dataframe(results_df)
+# -----------------------------
+# 8️⃣ Display Results
+# -----------------------------
+st.subheader("📊 Prediction Results")
+st.dataframe(results_df)
 
-    try:
-        log_to_gsheet_app2(df_input, predicted_labels)
-        st.success("✅ Logged to Google Sheets successfully.")
-    except Exception as e:
-        st.warning(f"⚠️ Logging to Google Sheets failed: {e}")
+# -----------------------------
+# 9️⃣ Log to Google Sheets
+# -----------------------------
+try:
+    log_to_gsheet_app2(df_input, predicted_labels)
+    st.success("✅ Logged to Google Sheets successfully.")
+except Exception as e:
+    st.warning(f"⚠️ Logging to Google Sheets failed: {e}")
 
+# -----------------------------
+# 🔟 Show Latest Entries
+# -----------------------------
 latest_rows, err = read_from_gsheet_app2(n=5)
+
 if latest_rows is None:
     st.warning(f"⚠️ Could not read from Google Sheets: {err}")
 else:
@@ -395,9 +408,9 @@ else:
                 df_latest = pd.DataFrame()
         except Exception:
             df_latest = pd.DataFrame()
+
     if not df_latest.empty:
         st.info("📖 Last rows in Google Sheets:")
         st.dataframe(df_latest)
     else:
         st.warning("⚠️ Google Sheet returned no recent rows.")
-
