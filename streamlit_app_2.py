@@ -336,26 +336,33 @@ if df_input is not None and not df_input.empty:
         st.error(f"❌ Ensemble prediction failed: {e}")
         st.stop()
 
-    try:
-        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
-    except Exception:
-        try:
-            calibrated_probs = iso_reg.predict(np.asarray(mean_probs).reshape(-1, 1)).flatten()
-        except Exception as e:
-            st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
-            calibrated_probs = mean_probs
+    # -----------------------------
+# 4️⃣ Calibration (Fixed)
+# -----------------------------
+try:
+    # Calibrate the mean probability per sample
+    calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+except Exception as e:
+    st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
+    calibrated_probs = mean_probs
 
-    try:
-        all_calibrated_probs = np.array([
-            iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
-        ])
-        std_devs_cal = np.std(all_calibrated_probs, axis=0)
-        entropy_cal = calculate_entropy(np.mean(all_calibrated_probs, axis=0))
-    except Exception:
-        std_devs_cal = std_devs_raw
-        entropy_cal = entropy_raw
+# -----------------------------
+# 5️⃣ Calibrated uncertainties (Fixed)
+# -----------------------------
+try:
+    # Transpose all_probs so iso_reg sees probabilities per sample
+    # all_probs shape: (n_models * n_forward_passes, n_samples)
+    calibrated_all_probs = iso_reg.predict(all_probs.T).T  # shape remains same
+    std_devs_cal = np.std(calibrated_all_probs, axis=0)
+    entropy_cal = calculate_entropy(calibrated_probs)
+except Exception:
+    std_devs_cal = std_devs_raw
+    entropy_cal = entropy_raw
 
-    predicted_labels = (calibrated_probs >= best_threshold).astype(int)
+# -----------------------------
+# 6️⃣ Apply best threshold
+# -----------------------------
+predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
     results_df = df_input.copy()
     results_df["raw_probability"] = mean_probs
