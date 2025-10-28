@@ -326,29 +326,42 @@ if df_input is not None and not df_input.empty:
     # -----------------------------
     # 3️⃣ Ensemble Predictions (vae_model + model_1 + model_2)
     # -----------------------------
+        # -----------------------------
+    # 3️⃣ Ensemble Predictions (stochastic, using Flipout sampling)
+    # -----------------------------
+    def stochastic_predict(model, X_input, n_samples=30):
+        """Run multiple stochastic forward passes with training=True."""
+        preds = []
+        for _ in range(n_samples):
+            p = model(X_input, training=True).numpy()
+            if p.ndim == 2 and p.shape[1] == 2:
+                p = p[:, -1]  # use positive class if softmax
+            elif p.ndim == 2 and p.shape[1] == 1:
+                p = p.flatten()
+            preds.append(np.clip(p, 0, 1))
+        preds = np.array(preds)
+        return np.mean(preds, axis=0), np.std(preds, axis=0)
+
     try:
-        all_probs = []
+        n_forward_passes = 30  # number of stochastic passes per model
+        model_means, model_stds = [], []
+
         for m in [vae_model, model_1, model_2]:
-            preds = m.predict(X_input)
-            preds = np.asarray(preds)
+            mean_p, std_p = stochastic_predict(m, X_input, n_samples=n_forward_passes)
+            model_means.append(mean_p)
+            model_stds.append(std_p)
 
-            # Handle softmax/sigmoid output
-            if preds.ndim == 2 and preds.shape[1] == 2:
-                preds = preds[:, -1]
-            elif preds.ndim == 2 and preds.shape[1] == 1:
-                preds = preds.flatten()
+        # Convert to arrays
+        model_means = np.array(model_means)
+        model_stds = np.array(model_stds)
 
-            preds = np.clip(preds, 0, 1)  # keep within [0,1]
-            all_probs.append(preds)
-
-        all_probs = np.array(all_probs)
-        mean_probs = np.mean(all_probs, axis=0)
-        std_devs_raw = np.std(all_probs, axis=0)
+        # Ensemble = average of model means
+        mean_probs = np.mean(model_means, axis=0)
+        std_devs_raw = np.mean(model_stds, axis=0)
         entropy_raw = calculate_entropy(mean_probs)
 
     except Exception as e:
         st.error(f"❌ Ensemble prediction failed: {e}")
-        all_probs = np.zeros((3, X_input.shape[0]))
         mean_probs = np.zeros(X_input.shape[0])
         std_devs_raw = np.zeros(X_input.shape[0])
         entropy_raw = np.zeros(X_input.shape[0])
