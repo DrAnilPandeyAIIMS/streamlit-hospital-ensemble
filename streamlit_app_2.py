@@ -356,10 +356,16 @@ if df_input is not None and not df_input.empty:
     # -----------------------------
     # 4️⃣ Calibration
     # -----------------------------
+    st.write("✅ Debug mean_probs[:10]:", mean_probs[:10])
+    st.write("✅ Shape of mean_probs:", mean_probs.shape)
+
     try:
         mean_probs = np.clip(mean_probs, 0, 1)
         calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
         st.info("✅ Calibration applied successfully.")
+        st.write("✅ Calibrated probs[:10]:", calibrated_probs[:10])
+        st.write("✅ Shape of calibrated_probs:", calibrated_probs.shape)
+
     except Exception as e:
         st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
         calibrated_probs = mean_probs
