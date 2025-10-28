@@ -307,6 +307,9 @@ elif input_method == "Upload CSV":
 # -----------------------------
 # Prediction Section
 # -----------------------------
+# =====================================================
+# 🔮 ENSEMBLE PREDICTION + CALIBRATION BLOCK
+# =====================================================
 if df_input is not None and not df_input.empty:
     try:
         df_prepared = preprocess_input(df_input, FEATURES, scaler)
@@ -320,39 +323,41 @@ if df_input is not None and not df_input.empty:
         st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
         st.stop()
 
-    # Helper: Ensure probabilities are single-output (binary)
-    def ensure_single_output(prob_array):
-        prob_array = np.asarray(prob_array)
-        if prob_array.ndim == 2:
-            if prob_array.shape[1] == 2:
-                # Softmax output, take positive class
-                prob_array = prob_array[:, -1]
-            elif prob_array.shape[1] == 1:
-                # Sigmoid output, flatten
-                prob_array = prob_array.flatten()
-        return prob_array
-
     # -----------------------------
-    # 3️⃣ Ensemble Predictions + Fallback
+    # 3️⃣ Ensemble Predictions (vae_model + model_1 + model_2)
     # -----------------------------
     try:
-        all_probs = ensemble_models_predict_all(X_input, n_forward_passes=10)
-        all_probs = np.asarray([ensure_single_output(p) for p in all_probs])
+        all_probs = []
+        for m in [vae_model, model_1, model_2]:
+            preds = m.predict(X_input)
+            preds = np.asarray(preds)
+
+            # Handle softmax/sigmoid output
+            if preds.ndim == 2 and preds.shape[1] == 2:
+                preds = preds[:, -1]
+            elif preds.ndim == 2 and preds.shape[1] == 1:
+                preds = preds.flatten()
+
+            preds = np.clip(preds, 0, 1)  # keep within [0,1]
+            all_probs.append(preds)
+
+        all_probs = np.array(all_probs)
         mean_probs = np.mean(all_probs, axis=0)
         std_devs_raw = np.std(all_probs, axis=0)
         entropy_raw = calculate_entropy(mean_probs)
+
     except Exception as e:
         st.error(f"❌ Ensemble prediction failed: {e}")
-        # Fallback so calibration and results don’t crash
-        all_probs = np.zeros((1, X_input.shape[0]))
+        all_probs = np.zeros((3, X_input.shape[0]))
         mean_probs = np.zeros(X_input.shape[0])
         std_devs_raw = np.zeros(X_input.shape[0])
         entropy_raw = np.zeros(X_input.shape[0])
 
     # -----------------------------
-    # 4️⃣ Calibration (Improved)
+    # 4️⃣ Calibration
     # -----------------------------
     try:
+        mean_probs = np.clip(mean_probs, 0, 1)
         calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
         st.info("✅ Calibration applied successfully.")
     except Exception as e:
@@ -394,6 +399,10 @@ if df_input is not None and not df_input.empty:
     # -----------------------------
     st.subheader("📊 Prediction Results")
     st.dataframe(results_df)
+
+    # Quick debug summary
+    st.write("mean_probs range:", float(mean_probs.min()), "to", float(mean_probs.max()))
+    st.write("calibrated_probs range:", float(calibrated_probs.min()), "to", float(calibrated_probs.max()))
 
     # -----------------------------
     # 9️⃣ Log to Google Sheets
