@@ -323,52 +323,67 @@ if df_input is not None and not df_input.empty:
         st.error(f"❌ Input shape {X_input.shape} does not match expected {expected_features_count} features.")
         st.stop()
 
-    # -----------------------------
-    # 3️⃣ Ensemble Predictions (vae_model + model_1 + model_2)
-    # -----------------------------
-        # -----------------------------
-    # 3️⃣ Ensemble Predictions (stochastic, using Flipout sampling)
-    # -----------------------------
-    def stochastic_predict(model, X_input, n_samples=30):
-        """Run multiple stochastic forward passes with training=True."""
-        preds = []
-        for _ in range(n_samples):
-            p = model(X_input, training=True).numpy()
-            if p.ndim == 2 and p.shape[1] == 2:
-                p = p[:, -1]  # use positive class if softmax
-            elif p.ndim == 2 and p.shape[1] == 1:
-                p = p.flatten()
-            preds.append(np.clip(p, 0, 1))
-        preds = np.array(preds)
-        return np.mean(preds, axis=0), np.std(preds, axis=0)
+    # =========================================================
+    # 3️⃣ Stochastic Ensemble Prediction with Progress Bar
+    # =========================================================
+    st.subheader("🔄 Running Stochastic Inference (with Progress Bar)")
+
+    n_forward_passes = 30  # Adjust 20–50 for reliability
+    models = [vae_model, model_1, model_2]
+    model_means, model_stds, all_model_probs = [], [], []
+
+    total_steps = len(models) * n_forward_passes
+    progress_bar = st.progress(0)
+    step = 0
 
     try:
-        n_forward_passes = 30  # number of stochastic passes per model
-        model_means, model_stds = [], []
+        for i, m in enumerate(models, start=1):
+            st.write(f"🧠 Running model {i}/{len(models)} ...")
+            preds = []
 
-        for m in [vae_model, model_1, model_2]:
-            mean_p, std_p = stochastic_predict(m, X_input, n_samples=n_forward_passes)
+            for _ in range(n_forward_passes):
+                p = m(X_input, training=True).numpy()
+
+                # Handle different output shapes
+                if p.ndim == 2 and p.shape[1] == 2:
+                    p = p[:, -1]  # positive class from softmax
+                elif p.ndim == 2 and p.shape[1] == 1:
+                    p = p.flatten()
+
+                preds.append(np.clip(p, 0, 1))
+                step += 1
+                progress_bar.progress(min(step / total_steps, 1.0))
+
+            preds = np.array(preds)
+            mean_p = np.mean(preds, axis=0)
+            std_p = np.std(preds, axis=0)
+
             model_means.append(mean_p)
             model_stds.append(std_p)
+            all_model_probs.append(preds)
 
-        # Convert to arrays
+        progress_bar.progress(1.0)
+        st.success("✅ Stochastic ensemble predictions completed!")
+
+        # Combine outputs
         model_means = np.array(model_means)
         model_stds = np.array(model_stds)
 
-        # Ensemble = average of model means
         mean_probs = np.mean(model_means, axis=0)
         std_devs_raw = np.mean(model_stds, axis=0)
         entropy_raw = calculate_entropy(mean_probs)
+        all_probs = np.concatenate(all_model_probs, axis=0)
 
     except Exception as e:
         st.error(f"❌ Ensemble prediction failed: {e}")
         mean_probs = np.zeros(X_input.shape[0])
         std_devs_raw = np.zeros(X_input.shape[0])
         entropy_raw = np.zeros(X_input.shape[0])
+        all_probs = np.zeros((10, X_input.shape[0]))
 
-    # -----------------------------
+    # =========================================================
     # 4️⃣ Calibration
-    # -----------------------------
+    # =========================================================
     st.write("✅ Debug mean_probs[:10]:", mean_probs[:10])
     st.write("✅ Shape of mean_probs:", mean_probs.shape)
 
@@ -378,14 +393,13 @@ if df_input is not None and not df_input.empty:
         st.info("✅ Calibration applied successfully.")
         st.write("✅ Calibrated probs[:10]:", calibrated_probs[:10])
         st.write("✅ Shape of calibrated_probs:", calibrated_probs.shape)
-
     except Exception as e:
         st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
         calibrated_probs = mean_probs
 
-    # -----------------------------
-    # 5️⃣ Calibrated uncertainties
-    # -----------------------------
+    # =========================================================
+    # 5️⃣ Calibrated Uncertainties
+    # =========================================================
     try:
         calibrated_all_probs = np.array([
             iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
@@ -396,14 +410,14 @@ if df_input is not None and not df_input.empty:
         std_devs_cal = std_devs_raw
         entropy_cal = entropy_raw
 
-    # -----------------------------
+    # =========================================================
     # 6️⃣ Threshold & Predictions
-    # -----------------------------
+    # =========================================================
     predicted_labels = (calibrated_probs >= best_threshold).astype(int)
 
-    # -----------------------------
+    # =========================================================
     # 7️⃣ Build Results DataFrame
-    # -----------------------------
+    # =========================================================
     results_df = df_input.copy()
     results_df["raw_probability"] = mean_probs
     results_df["calibrated_probability"] = calibrated_probs
@@ -413,13 +427,12 @@ if df_input is not None and not df_input.empty:
     results_df["entropy_raw"] = entropy_raw
     results_df["entropy_calibrated"] = entropy_cal
 
-    # -----------------------------
+    # =========================================================
     # 8️⃣ Display Results
-    # -----------------------------
+    # =========================================================
     st.subheader("📊 Prediction Results")
     st.dataframe(results_df)
 
-    # Quick debug summary
     st.write("mean_probs range:", float(mean_probs.min()), "to", float(mean_probs.max()))
     st.write("calibrated_probs range:", float(calibrated_probs.min()), "to", float(calibrated_probs.max()))
 
