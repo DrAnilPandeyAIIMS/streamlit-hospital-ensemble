@@ -329,9 +329,12 @@ if df_input is not None and not df_input.empty:
         # =========================================================
     # 🔄 Stochastic Ensemble Inference (with Progress Bar)
     # =========================================================
-    st.subheader("🔄 Running Stochastic Inference (with Progress Bar)")
+        # =========================================================
+    # 3️⃣ Improved Stochastic Ensemble Inference + Calibration
+    # =========================================================
+    st.subheader("🔄 Running Stochastic Ensemble Inference")
 
-    n_forward_passes = 30  # Adjust 20–50 for reliability
+    n_forward_passes = 50  # 🔹 Increase passes for better stochasticity
     models = [vae_model, model_1, model_2]
     model_means, model_stds, all_model_probs = [], [], []
 
@@ -345,7 +348,7 @@ if df_input is not None and not df_input.empty:
             preds = []
 
             for _ in range(n_forward_passes):
-                # Forward pass with dropout / Flipout active
+                # Stochastic forward pass (Flipout / Dropout active)
                 p = m(X_input, training=True).numpy()
 
                 # Handle output shape
@@ -358,92 +361,85 @@ if df_input is not None and not df_input.empty:
                 step += 1
                 progress_bar.progress(min(step / total_steps, 1.0))
 
-            # --- Debug stochastic variation ---
+            # Debug first few stochastic outputs
             if len(preds) >= 5:
                 sample_values = [float(preds[j][0]) for j in range(5)]
                 st.write(f"🔍 Model {i}: first 5 stochastic outputs → {sample_values}")
 
             preds = np.array(preds)
-            mean_p = np.mean(preds, axis=0)
-            std_p = np.std(preds, axis=0)
-
-            model_means.append(mean_p)
-            model_stds.append(std_p)
+            model_means.append(np.mean(preds, axis=0))
+            model_stds.append(np.std(preds, axis=0))
             all_model_probs.append(preds)
 
         progress_bar.progress(1.0)
         st.success("✅ Stochastic ensemble predictions completed!")
 
-        # Combine outputs
+        # =========================================================
+        # 4️⃣ Combine Model Outputs
+        # =========================================================
         model_means = np.array(model_means)
         model_stds = np.array(model_stds)
+        all_probs = np.concatenate(all_model_probs, axis=0)
 
         mean_probs = np.mean(model_means, axis=0)
         std_devs_raw = np.mean(model_stds, axis=0)
         entropy_raw = calculate_entropy(mean_probs)
-        all_probs = np.concatenate(all_model_probs, axis=0)
+
+        st.write("✅ mean_probs shape:", mean_probs.shape)
+        st.write("✅ mean_probs range:", float(mean_probs.min()), "to", float(mean_probs.max()))
+
+        # =========================================================
+        # 5️⃣ Apply Calibration
+        # =========================================================
+        try:
+            mean_probs = np.clip(mean_probs, 0, 1)
+            calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
+            st.info("✅ Calibration applied successfully.")
+        except Exception as e:
+            st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
+            calibrated_probs = mean_probs
+
+        # =========================================================
+        # 6️⃣ Calibrated Uncertainty
+        # =========================================================
+        try:
+            calibrated_all_probs = np.array([
+                iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
+            ])
+            std_devs_cal = np.std(calibrated_all_probs, axis=0)
+            entropy_cal = calculate_entropy(calibrated_probs)
+        except Exception:
+            std_devs_cal = std_devs_raw
+            entropy_cal = entropy_raw
+
+        # =========================================================
+        # 7️⃣ Thresholding and Predictions
+        # =========================================================
+        predicted_labels = (calibrated_probs >= best_threshold).astype(int)
+
+        # =========================================================
+        # 8️⃣ Build Results DataFrame
+        # =========================================================
+        results_df = df_input.copy()
+        results_df["raw_probability"] = mean_probs
+        results_df["calibrated_probability"] = calibrated_probs
+        results_df["predicted_label"] = predicted_labels
+        results_df["std_deviation_raw"] = std_devs_raw
+        results_df["std_deviation_calibrated"] = std_devs_cal
+        results_df["entropy_raw"] = entropy_raw
+        results_df["entropy_calibrated"] = entropy_cal
+
+        # =========================================================
+        # 9️⃣ Display Results
+        # =========================================================
+        st.subheader("📊 Prediction Results")
+        st.dataframe(results_df)
+        st.write("mean_probs range:", float(mean_probs.min()), "to", float(mean_probs.max()))
+        st.write("calibrated_probs range:", float(calibrated_probs.min()), "to", float(calibrated_probs.max()))
 
     except Exception as e:
         st.error(f"❌ Ensemble prediction failed: {e}")
-        mean_probs = np.zeros(X_input.shape[0])
-        std_devs_raw = np.zeros(X_input.shape[0])
-        entropy_raw = np.zeros(X_input.shape[0])
-        all_probs = np.zeros((10, X_input.shape[0]))
-
-    # =========================================================
-    # 4️⃣ Calibration
-    # =========================================================
-    st.write("✅ Debug mean_probs[:10]:", mean_probs[:10])
-    st.write("✅ Shape of mean_probs:", mean_probs.shape)
-
-    try:
-        mean_probs = np.clip(mean_probs, 0, 1)
-        calibrated_probs = iso_reg.predict(mean_probs.reshape(-1, 1)).flatten()
-        st.info("✅ Calibration applied successfully.")
-        st.write("✅ Calibrated probs[:10]:", calibrated_probs[:10])
-        st.write("✅ Shape of calibrated_probs:", calibrated_probs.shape)
-    except Exception as e:
-        st.warning(f"⚠️ Calibration failed, using raw probabilities. ({e})")
-        calibrated_probs = mean_probs
-
-    # =========================================================
-    # 5️⃣ Calibrated Uncertainties
-    # =========================================================
-    try:
-        calibrated_all_probs = np.array([
-            iso_reg.predict(p.reshape(-1, 1)).flatten() for p in all_probs
-        ])
-        std_devs_cal = np.std(calibrated_all_probs, axis=0)
-        entropy_cal = calculate_entropy(calibrated_probs)
-    except Exception:
-        std_devs_cal = std_devs_raw
-        entropy_cal = entropy_raw
-
-    # =========================================================
-    # 6️⃣ Threshold & Predictions
-    # =========================================================
-    predicted_labels = (calibrated_probs >= best_threshold).astype(int)
-
-    # =========================================================
-    # 7️⃣ Build Results DataFrame
-    # =========================================================
-    results_df = df_input.copy()
-    results_df["raw_probability"] = mean_probs
-    results_df["calibrated_probability"] = calibrated_probs
-    results_df["predicted_label"] = predicted_labels
-    results_df["std_deviation_raw"] = std_devs_raw
-    results_df["std_deviation_calibrated"] = std_devs_cal
-    results_df["entropy_raw"] = entropy_raw
-    results_df["entropy_calibrated"] = entropy_cal
-
-    # =========================================================
-    # 8️⃣ Display Results
-    # =========================================================
-    st.subheader("📊 Prediction Results")
-    st.dataframe(results_df)
-
-    st.write("mean_probs range:", float(mean_probs.min()), "to", float(mean_probs.max()))
-    st.write("calibrated_probs range:", float(calibrated_probs.min()), "to", float(calibrated_probs.max()))
+        results_df = pd.DataFrame()
 
     # -----------------------------
     # 9️⃣ Log to Google Sheets
