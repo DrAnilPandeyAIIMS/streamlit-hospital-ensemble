@@ -326,6 +326,9 @@ if df_input is not None and not df_input.empty:
     # =========================================================
     # 3️⃣ Stochastic Ensemble Prediction with Progress Bar
     # =========================================================
+        # =========================================================
+    # 🔄 Stochastic Ensemble Inference (with Progress Bar)
+    # =========================================================
     st.subheader("🔄 Running Stochastic Inference (with Progress Bar)")
 
     n_forward_passes = 30  # Adjust 20–50 for reliability
@@ -342,17 +345,23 @@ if df_input is not None and not df_input.empty:
             preds = []
 
             for _ in range(n_forward_passes):
+                # Forward pass with dropout / Flipout active
                 p = m(X_input, training=True).numpy()
 
-                # Handle different output shapes
+                # Handle output shape
                 if p.ndim == 2 and p.shape[1] == 2:
-                    p = p[:, -1]  # positive class from softmax
+                    p = p[:, -1]
                 elif p.ndim == 2 and p.shape[1] == 1:
                     p = p.flatten()
 
                 preds.append(np.clip(p, 0, 1))
                 step += 1
                 progress_bar.progress(min(step / total_steps, 1.0))
+
+            # --- Debug stochastic variation ---
+            if len(preds) >= 5:
+                sample_values = [float(preds[j][0]) for j in range(5)]
+                st.write(f"🔍 Model {i}: first 5 stochastic outputs → {sample_values}")
 
             preds = np.array(preds)
             mean_p = np.mean(preds, axis=0)
