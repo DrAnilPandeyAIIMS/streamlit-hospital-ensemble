@@ -26,7 +26,11 @@ from sklearn.metrics import (
     roc_auc_score,
     roc_curve
 )
-from sklearn.calibration import calibration_curve
+from sklearn.calibration import calibration_curve  
+# Add this right after imports
+import gc
+tf.keras.backend.clear_session()
+gc.collect()
 
 # ============================================================
 # 1. PAGE CONFIG & PATH SETUP
@@ -65,8 +69,11 @@ PERCENTILE_INFO_PATH     = OUTPUTS_DIR / "percentile_info.json"
 
 DEBUG    = os.getenv("DEBUG", "false").lower() == "true"
 EPS      = 1e-9
-MC_RUNS = 100   # 100 passes — matches paper methodology
-                # Sequential model loading keeps peak RAM = one model at a time
+# Change to:
+MC_RUNS = int(os.getenv("MC_RUNS", "30"))
+# This allows override via environment variable
+# Default 30 on Cloud, can set to 100 locally
+
 
 IS_CLOUD = os.getenv("STREAMLIT_SERVER_HEADLESS", "false") == "true"
 
@@ -789,7 +796,7 @@ scaler_cached, feature_names_cached = load_small_objects()
 # FIX 3,4,5,6,7,8,9: Complete rewrite of inference function
 # ============================================================
 mc_passes = MC_RUNS   # = 100
-def load_models_and_mc_for_batch(X_np, n_forward_passes=100):
+def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
     """
     4-Model Unanimous Ensemble Inference Pipeline.
 
