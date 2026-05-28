@@ -1,4 +1,14 @@
 import gc
+import sys
+import subprocess
+
+# Force-install huggingface_hub if missing (required for bayesian model download)
+try:
+    import huggingface_hub
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install",
+                    "huggingface_hub", "--quiet"], check=True)
+
 import streamlit as st
 import tensorflow as tf
 import os
