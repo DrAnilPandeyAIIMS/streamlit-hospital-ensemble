@@ -13,3 +13,4 @@ google-auth
 google-auth-oauthlib<1.1
 betacal
 joblib
+huggingface_hub

@@ -438,6 +438,8 @@ MODEL_FILES = {
         "id"  : "1tERLaaB5E8A3DfqFUo9YMdMtIvrCuGk1",
         "path": MODELS_DIR / "bayesian_model",
         "zip" : True,
+        "hf_repo": "akpandet/perioperative-models",
+        "hf_file": "bayesian_model_corrected.zip",
         "files": {}
     }
 }
@@ -506,6 +508,34 @@ def _ensure_model_downloaded(model_key: str) -> Path:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     dl_path = str(path.parent / f"{model_key}.zip") if is_zip else str(path)
+
+    # ── ATTEMPT 0: Hugging Face Hub (reliable, no rate limits) ─
+    # Used for bayesian_model (132 MB) — Google Drive blocks large
+    # files from cloud IPs. HF has no such restriction.
+    hf_repo = info.get("hf_repo")
+    hf_file = info.get("hf_file")
+    if hf_repo and hf_file and is_zip:
+        print(f"📥 Downloading {model_key} from Hugging Face Hub ({hf_repo})...")
+        try:
+            from huggingface_hub import hf_hub_download
+            hf_path = hf_hub_download(
+                repo_id=hf_repo,
+                filename=hf_file,
+                local_dir=str(path.parent),
+                repo_type="model"
+            )
+            import zipfile
+            hf_path_obj = Path(hf_path)
+            if hf_path_obj.exists() and hf_path_obj.stat().st_size > 100_000:
+                print(f"  HF downloaded ({hf_path_obj.stat().st_size:,} bytes) — extracting...")
+                with zipfile.ZipFile(str(hf_path_obj), "r") as zf:
+                    zf.extractall(str(path.parent))
+                hf_path_obj.unlink()
+                if path.exists() and (path / "saved_model.pb").exists():
+                    print(f"  ✅ {model_key} ready from Hugging Face Hub.")
+                    return path
+        except Exception as e:
+            print(f"  HF attempt exception: {e}")
 
     # ── ATTEMPT 1: gdown with fuzzy=True ─────────────────────
     # fuzzy=True lets gdown parse the HTML confirmation page
