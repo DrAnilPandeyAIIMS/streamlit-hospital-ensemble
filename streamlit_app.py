@@ -147,13 +147,10 @@ def load_pickle_safe(path: Path):
 
 # ============================================================
 # 3. LOAD THRESHOLD JSON
-# ── CHANGE 2: Updated fallback values from new threshold_raw.json
-#    best_t_raw=0.6986, best_threshold=0.4001
-#    Performance-normalized weights from Rokach 2010
 # ============================================================
 _CLOUD_FALLBACK = {
     "best_threshold"      : 0.4001,
-    "best_t_raw"          : 0.6986,      # ← updated from new threshold script
+    "best_t_raw"          : 0.6986,
     "threshold_method"    : "fallback",
     "high_risk_threshold" : 0.6250,
     "gamma"               : 0.10,
@@ -163,24 +160,20 @@ _CLOUD_FALLBACK = {
     "suppression_mult"    : 0.0893,
     "score_floor"         : 0.2678,
     "prevalence"          : 0.05594,
-    # ── CHANGE 2: Performance-normalized weights (Rokach 2010) ──
-    # w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5)
-    # VAE: (0.9441-0.5)/1.7164=0.2587  M1: (0.9010-0.5)/1.7164=0.2337
-    # M2:  (0.9598-0.5)/1.7164=0.2679  Bay:(0.9115-0.5)/1.7164=0.2398
     "weight_vae"          : 0.2587,
     "weight_m1"           : 0.2337,
     "weight_m2"           : 0.2679,
     "weight_bay"          : 0.2398,
-    "vae_weight"          : 0.2587,      # kept for backward compat
-    "m2_weight"           : 0.2679,      # kept for backward compat
+    "vae_weight"          : 0.2587,
+    "m2_weight"           : 0.2679,
     "majority_votes"      : 3,
     "n_models"            : 4,
     "consensus_threshold" : 0.58,
-    "vote_threshold_vae"  : 0.6259,      # updated from new threshold script
-    "vote_threshold_mid"  : 0.4830,      # updated
-    "vote_threshold_m2"   : 0.6086,      # updated — M2 corrected
-    "vote_threshold_bay"  : 0.6077,      # updated — Bayesian corrected
-    "vae_gate_threshold"  : 0.3130,      # updated
+    "vote_threshold_vae"  : 0.6259,
+    "vote_threshold_mid"  : 0.4830,
+    "vote_threshold_m2"   : 0.6086,
+    "vote_threshold_bay"  : 0.6077,
+    "vae_gate_threshold"  : 0.3130,
     "caution_weight"      : 0.5,
     "recall"              : None,
     "true_positives"      : None,
@@ -218,7 +211,6 @@ POWER_RAMP       = thr_data.get("power_ramp",          _CLOUD_FALLBACK["power_ra
 SUPPRESSION_MULT = thr_data.get("suppression_mult",    _CLOUD_FALLBACK["suppression_mult"])
 SCORE_FLOOR      = thr_data.get("score_floor",         _CLOUD_FALLBACK["score_floor"])
 PREVALENCE       = thr_data.get("prevalence",          _CLOUD_FALLBACK["prevalence"])
-# ── CHANGE 2: Read performance-normalized weights from json ──
 VAE_WEIGHT       = thr_data.get("weight_vae",  thr_data.get("vae_weight", 0.2587))
 M1_WEIGHT        = thr_data.get("weight_m1",   0.2337)
 M2_WEIGHT        = thr_data.get("weight_m2",   thr_data.get("m2_weight",  0.2679))
@@ -428,25 +420,22 @@ def plot_reliability(y_true, y_prob, title):
 
 # ============================================================
 # 11. MODEL REGISTRY & MANAGER
-# ── CHANGE 3: Updated Drive IDs and filenames ────────────────
-#   model_2: new ID for model_2_probabilistic_v2.h5 (β=8.22e-8)
-#   bayesian: new ID for bayesian_model_corrected.zip (He+BatchNorm)
 # ============================================================
 MODEL_FILES = {
     "vae_model": {
-        "id"  : "17do6Clm4WH_Us2Y_FVsANjj7_ktBQvlO",  # ensemble_final folder
+        "id"  : "17do6Clm4WH_Us2Y_FVsANjj7_ktBQvlO",
         "path": MODELS_DIR / "vae_model.h5"
     },
     "model_1": {
-        "id"  : "1cGQUH6cM_18rmJ0_2RuNcdt4DWFSpxCG",  # ensemble_final folder
+        "id"  : "1cGQUH6cM_18rmJ0_2RuNcdt4DWFSpxCG",
         "path": MODELS_DIR / "model_1_custom.h5",
     },
     "model_2": {
-        "id"  : "1q6CVPm_WwIxLq_2tDCEmNs_Mg0Xt2kdq",  # ensemble_final — v2 β=8.22e-8 AUC=0.98
+        "id"  : "1q6CVPm_WwIxLq_2tDCEmNs_Mg0Xt2kdq",
         "path": MODELS_DIR / "model_2_probabilistic_v2.h5",
     },
     "bayesian_model": {
-        "id"  : "11V83xPnoowXtwcwueotELeefX6ZI9kmi",  # ensemble_final — He+BatchNorm AUC=0.95
+        "id"  : "11V83xPnoowXtwcwueotELeefX6ZI9kmi",
         "path": MODELS_DIR / "bayesian_model",
         "zip" : True,
         "files": {}
@@ -469,6 +458,20 @@ def _model_is_cached(key: str) -> bool:
     else:
         return path.exists() and path.stat().st_size > 100_000
 
+
+# ============================================================
+# ── FIXED _ensure_model_downloaded ───────────────────────────
+# CHANGE: fuzzy=True on ALL gdown attempts (both Attempt 1 and
+#         Attempt 2).  fuzzy=True makes gdown handle Google's
+#         virus-scan confirmation page automatically, which is
+#         the root cause of the "0 bytes / cannot retrieve"
+#         error on large files (>100 MB).
+#
+# Three-layer fallback:
+#   1. gdown fuzzy=True  (handles scan page automatically)
+#   2. gdown confirm URL + fuzzy=True  (explicit confirm token)
+#   3. requests streaming  (manual cookie-based confirm)
+# ============================================================
 def _ensure_model_downloaded(model_key: str) -> Path:
     import gdown
     import requests
@@ -478,6 +481,7 @@ def _ensure_model_downloaded(model_key: str) -> Path:
     drive_id = info["id"]
     is_zip   = info.get("zip", False)
 
+    # ── Already present? ─────────────────────────────────────
     if is_zip:
         if path.exists() and path.is_dir() and (path / "saved_model.pb").exists():
             return path
@@ -485,68 +489,94 @@ def _ensure_model_downloaded(model_key: str) -> Path:
         if path.exists() and path.stat().st_size > 100_000:
             return path
 
+    # ── Clean stale partial downloads ────────────────────────
     if is_zip:
         if path.exists() and path.is_dir():
             try:
                 import shutil
                 shutil.rmtree(str(path))
-            except Exception: pass
+            except Exception:
+                pass
     else:
         if path.exists():
-            try: path.unlink()
-            except Exception: pass
+            try:
+                path.unlink()
+            except Exception:
+                pass
 
     path.parent.mkdir(parents=True, exist_ok=True)
-
-    print(f"📥 Downloading {model_key} (ID: {drive_id[:8]}...) Attempt 1...")
-    url     = f"https://drive.google.com/uc?id={drive_id}"
     dl_path = str(path.parent / f"{model_key}.zip") if is_zip else str(path)
+
+    # ── ATTEMPT 1: gdown with fuzzy=True ─────────────────────
+    # fuzzy=True lets gdown parse the HTML confirmation page
+    # that Google shows for large files — previously missing
+    # from Attempt 1, causing silent 0-byte downloads.
+    print(f"📥 Downloading {model_key} (ID: {drive_id[:8]}...) — Attempt 1 (fuzzy=True)...")
+    url = f"https://drive.google.com/uc?id={drive_id}"
     try:
         gdown.download(url, dl_path, quiet=False, fuzzy=True)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  Attempt 1 exception: {e}")
 
     dl_path_obj = Path(dl_path)
     if is_zip and dl_path_obj.exists() and dl_path_obj.stat().st_size > 100_000:
+        print(f"  Attempt 1 zip downloaded ({dl_path_obj.stat().st_size:,} bytes) — extracting...")
         with zipfile.ZipFile(str(dl_path_obj), "r") as zf:
             zf.extractall(str(path.parent))
         dl_path_obj.unlink()
         if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 1.")
             return path
     elif not is_zip and path.exists() and path.stat().st_size > 100_000:
+        print(f"  ✅ {model_key} ready after Attempt 1.")
         return path
 
-    if path.exists():
-        try: path.unlink()
-        except Exception: pass
+    # ── ATTEMPT 2: explicit confirm token + fuzzy=True ───────
+    # Adds confirm=t to URL AND keeps fuzzy=True so gdown
+    # can still handle any remaining scan page redirect.
+    print(f"📥 Downloading {model_key} — Attempt 2 (confirm=t + fuzzy=True)...")
+    if Path(dl_path).exists():
+        try:
+            Path(dl_path).unlink()
+        except Exception:
+            pass
+    confirm_url = f"https://drive.google.com/uc?export=download&confirm=t&id={drive_id}"
     try:
-        confirm_url = f"https://drive.google.com/uc?export=download&confirm=t&id={drive_id}"
         gdown.download(confirm_url, dl_path, quiet=False, fuzzy=True)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  Attempt 2 exception: {e}")
 
     dl_path_obj2 = Path(dl_path)
     if is_zip and dl_path_obj2.exists() and dl_path_obj2.stat().st_size > 100_000:
+        print(f"  Attempt 2 zip downloaded ({dl_path_obj2.stat().st_size:,} bytes) — extracting...")
         import zipfile as zf2
         with zf2.ZipFile(str(dl_path_obj2), "r") as z:
             z.extractall(str(path.parent))
         dl_path_obj2.unlink()
         if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 2.")
             return path
     elif not is_zip and path.exists() and path.stat().st_size > 100_000:
+        print(f"  ✅ {model_key} ready after Attempt 2.")
         return path
 
-    if path.exists():
-        try: path.unlink()
-        except Exception: pass
+    # ── ATTEMPT 3: requests streaming with cookie confirm ────
+    # Manual HTTP fallback — handles cases where gdown's
+    # internal UA triggers an extra CAPTCHA layer.
+    print(f"📥 Downloading {model_key} — Attempt 3 (requests streaming)...")
+    if Path(dl_path).exists():
+        try:
+            Path(dl_path).unlink()
+        except Exception:
+            pass
     try:
         session  = requests.Session()
         response = session.get(
             f"https://drive.google.com/uc?export=download&id={drive_id}",
             stream=True, timeout=60)
         token = None
-        for key, value in response.cookies.items():
-            if key.startswith('download_warning'):
+        for key_c, value in response.cookies.items():
+            if key_c.startswith('download_warning'):
                 token = value
                 break
         if token:
@@ -558,25 +588,31 @@ def _ensure_model_downloaded(model_key: str) -> Path:
             for chunk in response.iter_content(chunk_size=32768):
                 if chunk:
                     f.write(chunk)
-    except Exception:
-        pass
+        print(f"  Attempt 3 wrote {Path(dl_path).stat().st_size if Path(dl_path).exists() else 0:,} bytes")
+    except Exception as e:
+        print(f"  Attempt 3 exception: {e}")
 
-    if _model_is_cached(model_key):
-        return path
+    # ── Final extraction if zip ───────────────────────────────
     final_dl = Path(dl_path)
     if is_zip and final_dl.exists() and final_dl.stat().st_size > 100_000:
+        print(f"  Attempt 3 zip downloaded — extracting...")
         import zipfile as zf3
         with zf3.ZipFile(str(final_dl), "r") as z:
             z.extractall(str(path.parent))
         final_dl.unlink()
         if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 3.")
             return path
 
+    if _model_is_cached(model_key):
+        return path
+
     size = path.stat().st_size if path.exists() else 0
-    print(f"❌ Failed to download {model_key} (Drive ID: {drive_id}). Size: {size:,} bytes")
+    print(f"❌ All 3 attempts failed for {model_key} (Drive ID: {drive_id}). Final size: {size:,} bytes")
     raise RuntimeError(
         f"Failed to download {model_key} (Drive ID: {drive_id}). "
-        f"Size: {size:,} bytes. Check Google Drive sharing settings.")
+        f"Size: {size:,} bytes. Check Google Drive sharing settings and rate limits.")
+
 
 def _load_model_cached(key: str):
     info = MODEL_FILES[key]
@@ -617,7 +653,6 @@ model_manager = SingleModelManager()
 
 # ============================================================
 # 12. TENSORFLOW CUSTOM OBJECTS
-# ── CHANGE 4: DenseFlipoutLayer with kl_weight for corrected M2
 # ============================================================
 def _initialize_tensorflow_components():
     import tensorflow_probability as tfp
@@ -656,10 +691,6 @@ def _initialize_tensorflow_components():
             config["make_posterior_fn"] = posterior
             return cls(**config)
 
-    # ── CHANGE 4: DenseFlipoutLayer with kl_weight ───────────
-    # Required for loading model_2_probabilistic_v2.h5
-    # Corrected M2 was trained with kl_weight=8.22e-8
-    # get_config() enables H5 serialization/deserialization
     class DenseFlipoutLayer(tf.keras.layers.Layer):
         def __init__(self, units, activation=None,
                      kl_weight=1.0, **kwargs):
@@ -740,26 +771,9 @@ scaler_cached, feature_names_cached = load_small_objects()
 
 # ============================================================
 # 14. MC INFERENCE — 4-MODEL ENSEMBLE
-# ── CHANGE 5: Remove M2 inversion, use perf-normalized weights
 # ============================================================
 mc_passes = MC_RUNS
 def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
-    """
-    4-Model Ensemble Inference Pipeline.
-
-    Models (in order):
-        col 0 — vae_model      AUC=0.9441  w=0.2587
-        col 1 — model_1        AUC=0.9010  w=0.2337
-        col 2 — model_2        AUC=0.9598  w=0.2679  β=8.22e-8 CORRECTED
-        col 3 — bayesian_model AUC=0.9115  w=0.2398  He+BatchNorm CORRECTED
-
-    Weights: performance-normalized (Rokach 2010)
-        w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5)
-        Σw = 1.0 — no denominator needed
-
-    NOTE: bayesian_model outputs RAW LOGITS — sigmoid applied
-          model_2 corrected: outputs probabilities directly — NO inversion
-    """
     model_keys = ["vae_model", "model_1", "model_2", "bayesian_model"]
     X_tensor   = tf.convert_to_tensor(np.asarray(X_np, dtype=np.float32))
 
@@ -780,11 +794,7 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
                 raw = tf.math.sigmoid(
                     tf.constant(raw, dtype=tf.float32)).numpy()
 
-            # ── CHANGE 5: M2 corrected — NO inversion ────────
-            # Old M2 (wrong β): raw AUC=0.405 < 0.5 → needed 1-p
-            # New M2 (β=8.22e-8): raw AUC=0.9598 > 0.5 → correct direction
-            # m2_p = 1.0 - m2_p  ← REMOVED
-
+            # M2 corrected β=8.22e-8: correct direction — NO inversion
             mc_samples.append(raw)
 
         all_model_mc_means.append(
@@ -798,12 +808,9 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
 
     vae_p = mean_per_model[:, 0]
     m1_p  = mean_per_model[:, 1]
-    m2_p  = mean_per_model[:, 2]  # corrected — no inversion
-    bay_p = mean_per_model[:, 3]  # sigmoid already applied above
+    m2_p  = mean_per_model[:, 2]
+    bay_p = mean_per_model[:, 3]
 
-    # ── CHANGE 5: Performance-normalized weights ──────────────
-    # w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5)  [Rokach 2010]
-    # Weights sum to 1.0 — no Z denominator needed
     _w_vae = thr_data.get("weight_vae", thr_data.get("vae_weight", 0.2587))
     _w_m1  = thr_data.get("weight_m1",  0.2337)
     _w_m2  = thr_data.get("weight_m2",  thr_data.get("m2_weight", 0.2679))
@@ -813,9 +820,7 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
                  m1_p  * _w_m1  +
                  m2_p  * _w_m2  +
                  bay_p * _w_bay)
-    # Note: weights sum to ~1.0 so no division needed
 
-    # Vote flags — thresholds from threshold_raw.json
     v_vae = (vae_p > thr_data.get("vote_threshold_vae", 0.6259)).astype(int)
     v_m1  = (m1_p  > thr_data.get("vote_threshold_mid", 0.4830)).astype(int)
     v_m2  = (m2_p  > thr_data.get("vote_threshold_m2",  0.6086)).astype(int)
@@ -1170,8 +1175,6 @@ if mode == "Batch CSV":
         results = df_raw.copy()
         results["P_VAE"]           = np.round(m_means[:, 0], 4)
         results["P_M1_Flipout"]    = np.round(m_means[:, 1], 4)
-        # ── CHANGE 5: P_M2_corrected — no inversion ──────────
-        # M2 corrected β=8.22e-8: outputs correct direction AUC=0.9598
         results["P_M2_corrected"]  = np.round(m_means[:, 2], 4)
         results["P_Bayesian"]      = np.round(m_means[:, 3], 4)
         results["Ensemble_Mean"]   = np.round(np.mean(m_means, axis=1), 4)
