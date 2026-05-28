@@ -546,11 +546,25 @@ def _ensure_model_downloaded(model_key: str) -> Path:
                 with zipfile.ZipFile(str(zip_dest), "r") as zf:
                     zf.extractall(str(path.parent))
                 zip_dest.unlink()
+                # Check if saved_model.pb is directly at expected path
                 if path.exists() and (path / "saved_model.pb").exists():
                     print(f"  ✅ {model_key} ready from Hugging Face.")
                     return path
-                else:
-                    raise RuntimeError(f"HF zip extracted but saved_model.pb not found at {path}")
+                # Zip may extract to a differently-named subfolder — find saved_model.pb
+                import glob
+                pb_matches = glob.glob(str(path.parent / "**/saved_model.pb"), recursive=True)
+                print(f"  saved_model.pb search results: {pb_matches}")
+                if pb_matches:
+                    import shutil
+                    found_dir = Path(pb_matches[0]).parent
+                    print(f"  Found model at: {found_dir} — moving to {path}")
+                    if path.exists():
+                        shutil.rmtree(str(path))
+                    shutil.move(str(found_dir), str(path))
+                    if path.exists() and (path / "saved_model.pb").exists():
+                        print(f"  ✅ {model_key} ready from Hugging Face (after rename).")
+                        return path
+                raise RuntimeError(f"HF zip extracted but saved_model.pb not found anywhere under {path.parent}. pb_matches={pb_matches}")
             else:
                 raise RuntimeError(f"HF download too small: {size} bytes — repo may be private")
         except Exception as e:
