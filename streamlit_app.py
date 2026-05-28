@@ -525,27 +525,38 @@ def _ensure_model_downloaded(model_key: str) -> Path:
     hf_repo = info.get("hf_repo")
     hf_file = info.get("hf_file")
     if hf_repo and hf_file and is_zip:
-        print(f"📥 Downloading {model_key} from Hugging Face Hub ({hf_repo})...")
+        import requests, zipfile
+        # Direct HF URL — works for public repos, no hf_hub_download needed
+        hf_url = f"https://huggingface.co/{hf_repo}/resolve/main/{hf_file}?download=true"
+        print(f"📥 Downloading {model_key} from HF direct URL...")
+        print(f"  URL: {hf_url}")
+        zip_dest = path.parent / hf_file
         try:
-            from huggingface_hub import hf_hub_download
-            hf_path = hf_hub_download(
-                repo_id=hf_repo,
-                filename=hf_file,
-                local_dir=str(path.parent),
-                repo_type="model"
-            )
-            import zipfile
-            hf_path_obj = Path(hf_path)
-            if hf_path_obj.exists() and hf_path_obj.stat().st_size > 100_000:
-                print(f"  HF downloaded ({hf_path_obj.stat().st_size:,} bytes) — extracting...")
-                with zipfile.ZipFile(str(hf_path_obj), "r") as zf:
+            r = requests.get(hf_url, stream=True, timeout=600,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            with open(zip_dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+            size = zip_dest.stat().st_size if zip_dest.exists() else 0
+            print(f"  Downloaded {size:,} bytes")
+            if size > 100_000:
+                print(f"  Extracting zip...")
+                with zipfile.ZipFile(str(zip_dest), "r") as zf:
                     zf.extractall(str(path.parent))
-                hf_path_obj.unlink()
+                zip_dest.unlink()
                 if path.exists() and (path / "saved_model.pb").exists():
-                    print(f"  ✅ {model_key} ready from Hugging Face Hub.")
+                    print(f"  ✅ {model_key} ready from Hugging Face.")
                     return path
+                else:
+                    raise RuntimeError(f"HF zip extracted but saved_model.pb not found at {path}")
+            else:
+                raise RuntimeError(f"HF download too small: {size} bytes — repo may be private")
         except Exception as e:
-            print(f"  HF attempt exception: {e}")
+            print(f"  HF direct download failed: {e}")
+            if zip_dest.exists():
+                zip_dest.unlink()
 
     # ── ATTEMPT 1: gdown with fuzzy=True ─────────────────────
     # fuzzy=True lets gdown parse the HTML confirmation page
