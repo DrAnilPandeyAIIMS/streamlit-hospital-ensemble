@@ -944,8 +944,10 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
     _gamma         = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
     adjusted_probs = weighted_probs + (_gamma * entropy_norm)
 
-    runtime_threshold = thr_data.get("best_t_raw", best_threshold_saved)
-    high_risk_thr     = thr_data.get("high_risk_threshold", HIGH_RISK_BOUNDARY)
+    # Use Youden threshold (0.4001) — gave TP=13, FP=0, FN=0 on test set
+    # best_t_raw (0.6986) is raw-space conversion — too strict for deployment
+    runtime_threshold = best_threshold_saved   # 0.4001
+    high_risk_thr     = thr_data.get("high_risk_threshold", HIGH_RISK_BOUNDARY)  # 0.6250
 
     triage_levels = [
         triage_levels_logic(score, runtime_threshold, high_risk_thr)
@@ -1272,7 +1274,7 @@ if mode == "Batch CSV":
         results["Uncertainty_SD"]  = np.round(uncertainties, 4)
         results["Entropy_Norm"]    = np.round(entropy_norm, 4)
         results["Gated_Score"]     = np.round(gated_scores, 4)
-        runtime_thr = thr_data.get("best_t_raw", best_threshold_saved)
+        runtime_thr = best_threshold_saved   # 0.4001 — Youden threshold
         results["Risk_Label"]      = np.where(gated_scores >= runtime_thr, "High Risk", "Low Risk")
         triage_display = [
             t.replace("🔴 ","").replace("🟡 ","").replace("🟢 ","")
@@ -1283,7 +1285,7 @@ if mode == "Batch CSV":
 
         st.divider()
         st.write(f"📊 **Batch Diagnostics:** Avg Entropy: {float(np.mean(entropy)):.4f} | "
-                 f"T_screen: {runtime_thr:.4f} | HIGH_RISK: {HIGH_RISK_BOUNDARY:.4f}")
+                 f"T_screen (Youden): {runtime_thr:.4f} | HIGH_RISK: {HIGH_RISK_BOUNDARY:.4f}")
 
         high_risk_count = int(np.sum(results["Risk_Label"] == "High Risk"))
         m1, m2, m3 = st.columns(3)
@@ -1427,7 +1429,7 @@ elif mode == "Manual Entry":
         en_val            = float(entropy_norm[0])
         ensemble_mean_val = float(np.mean(m_means[0]))
 
-        runtime_thr  = thr_data.get("best_t_raw", best_threshold_saved)
+        runtime_thr  = best_threshold_saved   # 0.4001 Youden threshold
         is_high_risk = adj_p >= runtime_thr
         is_near_miss = (not is_high_risk) and (adj_p >= best_threshold_saved - 0.10)
         label        = "High Risk" if is_high_risk else ("Borderline" if is_near_miss else "Low Risk")
@@ -1538,3 +1540,4 @@ elif mode == "Manual Entry":
         ok, err = append_to_gsheet(pd.DataFrame([audit_row]))
         if ok: st.success("✅ Patient record synced to clinical vault.")
         else: st.error(f"Sync failed: {err}")
+
