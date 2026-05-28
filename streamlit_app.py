@@ -554,9 +554,11 @@ def _ensure_model_downloaded(model_key: str) -> Path:
             else:
                 raise RuntimeError(f"HF download too small: {size} bytes — repo may be private")
         except Exception as e:
-            print(f"  HF direct download failed: {e}")
+            import streamlit as _st
+            _st.error(f"🔴 HF download error for {model_key}: {type(e).__name__}: {e}")
             if zip_dest.exists():
                 zip_dest.unlink()
+            raise RuntimeError(f"HF download failed: {type(e).__name__}: {e}") from e
 
     # ── ATTEMPT 1: gdown with fuzzy=True ─────────────────────
     # fuzzy=True lets gdown parse the HTML confirmation page
