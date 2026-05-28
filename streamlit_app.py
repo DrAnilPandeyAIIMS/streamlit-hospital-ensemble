@@ -719,6 +719,30 @@ class SingleModelManager:
 model_manager = SingleModelManager()
 
 # ============================================================
+# PRE-DOWNLOAD ALL MODELS AT STARTUP (cached — runs once only)
+# Prevents timeout during inference by downloading before user
+# interaction. @st.cache_resource persists across reruns.
+# ============================================================
+@st.cache_resource(show_spinner="⏳ Downloading models (first run only — ~2 min)...")
+def _predownload_all_models():
+    results = {}
+    for key in ["vae_model", "model_1", "model_2", "bayesian_model"]:
+        try:
+            if not _model_is_cached(key):
+                print(f"🔄 Pre-downloading {key}...")
+                _ensure_model_downloaded(key)
+                print(f"✅ Pre-download complete: {key}")
+            else:
+                print(f"✅ Already cached: {key}")
+            results[key] = "ok"
+        except Exception as e:
+            print(f"❌ Pre-download failed for {key}: {e}")
+            results[key] = f"failed: {e}"
+    return results
+
+_predownload_status = _predownload_all_models()
+
+# ============================================================
 # 12. TENSORFLOW CUSTOM OBJECTS
 # ============================================================
 def _initialize_tensorflow_components():
