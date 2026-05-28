@@ -435,7 +435,7 @@ MODEL_FILES = {
         "path": MODELS_DIR / "model_2_probabilistic_v2.h5",
     },
     "bayesian_model": {
-        "id"  : "11V83xPnoowXtwcwueotELeefX6ZI9kmi",
+        "id"  : "1tERLaaB5E8A3DfqFUo9YMdMtIvrCuGk1",
         "path": MODELS_DIR / "bayesian_model",
         "zip" : True,
         "files": {}
