@@ -434,24 +434,25 @@ def plot_reliability(y_true, y_prob, title):
 # ============================================================
 MODEL_FILES = {
     "vae_model": {
-        "id"  : "1yG2pCH6iybXQ9-54JAtF_iT9B9YWkr2a",
+        "id"  : "17do6Clm4WH_Us2Y_FVsANjj7_ktBQvlO",  # ensemble_final folder
         "path": MODELS_DIR / "vae_model.h5"
     },
     "model_1": {
-        "id"  : "1rlGeB6Jww9xtgQ3Po4gwYEEbhbGe_AfT",
+        "id"  : "1cGQUH6cM_18rmJ0_2RuNcdt4DWFSpxCG",  # ensemble_final folder
         "path": MODELS_DIR / "model_1_custom.h5",
     },
     "model_2": {
-        "id"  : "1bgBk4b0c0vmoouoqfescvBhQ2XPBQvMP",  # NEW — v2 β=8.22e-8 AUC=0.98
+        "id"  : "1q6CVPm_WwIxLq_2tDCEmNs_Mg0Xt2kdq",  # ensemble_final — v2 β=8.22e-8 AUC=0.98
         "path": MODELS_DIR / "model_2_probabilistic_v2.h5",
     },
     "bayesian_model": {
-        "id"  : "1mvyefR_jWUloACgGGCVCA4pCp8w92T8z",  # NEW — He+BatchNorm AUC=0.95
+        "id"  : "11V83xPnoowXtwcwueotELeefX6ZI9kmi",  # ensemble_final — He+BatchNorm AUC=0.95
         "path": MODELS_DIR / "bayesian_model",
         "zip" : True,
         "files": {}
     }
 }
+
 
 def _model_is_cached(key: str) -> bool:
     info   = MODEL_FILES[key]
