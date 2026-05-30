@@ -15,7 +15,7 @@
   "majority_votes": 3,
   "m2_inverted": false,
   "gate_note": "majority_votes=3. Clinical deployment choice. All four models corrected \u2014 VAE AUC=0.9441, M1 AUC=0.9010, M2 AUC=0.9598 (\u03b2 corrected), Bay AUC=0.9115 (He prior+BatchNorm). Gate majority=3 requires consensus of 3/4 models. Reference: Cvach 2012 (alert fatigue).",
-  "best_threshold": 0.40008001598653065,
+  "best_threshold": 0.6987,
   "best_t_raw": 0.6986387701363892,
   "threshold_method": "Youden_4model_majority3",
   "high_risk_threshold": 0.8649,
