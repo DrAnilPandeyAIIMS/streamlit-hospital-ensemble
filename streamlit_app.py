@@ -89,7 +89,7 @@ PERCENTILE_INFO_PATH     = OUTPUTS_DIR / "percentile_info.json"
 
 DEBUG   = os.getenv("DEBUG", "false").lower() == "true"
 EPS     = 1e-9
-MC_RUNS = int(os.getenv("MC_RUNS", "30"))
+MC_RUNS = int(os.getenv("MC_RUNS", "100"))
 IS_CLOUD = os.getenv("STREAMLIT_SERVER_HEADLESS", "false") == "true"
 
 # ── Validate cached model files ───────────────────────────────
