@@ -159,10 +159,10 @@ def load_pickle_safe(path: Path):
 # 3. LOAD THRESHOLD JSON
 # ============================================================
 _CLOUD_FALLBACK = {
-    "best_threshold"      : 0.4001,
-    "best_t_raw"          : 0.6986,
+    "best_threshold"      : 0.6987,   # raw-space deployment threshold (NOT rank-space 0.4001)
+    "best_t_raw"          : 0.6987,   # same — used by runtime_threshold logic
     "threshold_method"    : "fallback",
-    "high_risk_threshold" : 0.6250,
+    "high_risk_threshold" : 0.8649,   # validated HIGH_RISK boundary (T_high)
     "gamma"               : 0.10,
     "gamma_safety"        : 0.10,
     "k_steepness"         : 5.5794,
@@ -868,6 +868,9 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
     model_keys = ["vae_model", "model_1", "model_2", "bayesian_model"]
     X_tensor   = tf.convert_to_tensor(np.asarray(X_np, dtype=np.float32))
 
+    # FIX: seed set ONCE before all MC passes — not per-pass
+    # seed=42+i inside the loop causes score variance between runs
+    # and can flip borderline patients (e.g. Patient 37, margin=0.000001)
     tf.random.set_seed(42)
     np.random.seed(42)
 
@@ -876,7 +879,6 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
         model      = model_manager.load(key)
         mc_samples = []
         for i in range(n_forward_passes):
-            tf.random.set_seed(42 + i)
             raw = ensure_single_output(
                 model(X_tensor, training=True))
 
@@ -944,10 +946,14 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
     _gamma         = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
     adjusted_probs = weighted_probs + (_gamma * entropy_norm)
 
-    # Use Youden threshold (0.4001) — gave TP=13, FP=0, FN=0 on test set
-    # best_t_raw (0.6986) is raw-space conversion — too strict for deployment
-    runtime_threshold = best_threshold_saved   # 0.4001
-    high_risk_thr     = thr_data.get("high_risk_threshold", HIGH_RISK_BOUNDARY)  # 0.6250
+    # FIX: use raw-space deployment threshold T=0.6987, NOT rank-space 0.4001
+    # 0.4001 is the rank-transform Youden threshold — only valid during calibration
+    # At inference (no labels available), rank-transform cannot be applied
+    # Correct thresholds derived from validation cohort (n=233):
+    #   T_screen  = 0.6987  → sensitivity 100%, specificity 83.2%, J=0.832, FP=37
+    #   T_high    = 0.8649  → sensitivity 76.9%, specificity 97.3%, J=0.742, FP=6
+    runtime_threshold = thr_data.get("best_t_raw", 0.6987)  # raw-space: 0.6987
+    high_risk_thr     = 0.8649                               # validated HIGH_RISK boundary
 
     triage_levels = [
         triage_levels_logic(score, runtime_threshold, high_risk_thr)
@@ -1274,13 +1280,13 @@ if mode == "Batch CSV":
         results["Uncertainty_SD"]  = np.round(uncertainties, 4)
         results["Entropy_Norm"]    = np.round(entropy_norm, 4)
         results["Gated_Score"]     = np.round(gated_scores, 4)
-        runtime_thr = best_threshold_saved   # 0.4001 — Youden threshold
+        runtime_thr = thr_data.get("best_t_raw", 0.6987)   # raw-space deployment threshold
         results["Risk_Label"]      = np.where(gated_scores >= runtime_thr, "High Risk", "Low Risk")
         triage_display = [
             t.replace("🔴 ","").replace("🟡 ","").replace("🟢 ","")
             for t in triage_levels]
         results["Triage_Level"]    = triage_display
-        results["Threshold_Used"]  = round(float(best_threshold_saved), 4)
+        results["Threshold_Used"]  = round(float(runtime_thr), 4)
         results["Threshold_Method"] = THRESHOLD_METHOD
 
         st.divider()
@@ -1429,9 +1435,9 @@ elif mode == "Manual Entry":
         en_val            = float(entropy_norm[0])
         ensemble_mean_val = float(np.mean(m_means[0]))
 
-        runtime_thr  = best_threshold_saved   # 0.4001 Youden threshold
+        runtime_thr  = thr_data.get("best_t_raw", 0.6987)   # raw-space deployment threshold
         is_high_risk = adj_p >= runtime_thr
-        is_near_miss = (not is_high_risk) and (adj_p >= best_threshold_saved - 0.10)
+        is_near_miss = (not is_high_risk) and (adj_p >= runtime_thr - 0.10)
         label        = "High Risk" if is_high_risk else ("Borderline" if is_near_miss else "Low Risk")
 
         cal_p, cal_method = calibrate_single(adj_p, "Platt")
