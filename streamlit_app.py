@@ -54,7 +54,7 @@ with st.spinner("⏳ Initializing models..."):
 # ============================================================
 BASE_DIR   = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
-OUTPUTS_DIR            = MODELS_DIR / "outputs" / "ensemble_model_2"
+OUTPUTS_DIR            = MODELS_DIR / "outputs" / "ensemble_model_1"
 RAW_THRESHOLD_PATH     = OUTPUTS_DIR / "threshold_raw.json"
 BETA_CALIBRATOR_PATH   = OUTPUTS_DIR / "beta_reg.pkl"
 ISOTONIC_CALIBRATOR_PATH = OUTPUTS_DIR / "isotonic_reg.pkl"
