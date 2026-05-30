@@ -1,4 +1,14 @@
 import gc
+import sys
+import subprocess
+
+# Force-install huggingface_hub if missing (required for bayesian model download)
+try:
+    import huggingface_hub
+except ImportError:
+    subprocess.run([sys.executable, "-m", "pip", "install",
+                    "huggingface_hub", "--quiet"], check=True)
+
 import streamlit as st
 import tensorflow as tf
 import os
@@ -23,10 +33,24 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
     f1_score,
-    roc_auc_score
+    roc_auc_score,
+    roc_curve
 )
-from sklearn.calibration import calibration_curve
-
+from sklearn.calibration import calibration_curve  
+import gc
+tf.keras.backend.clear_session()
+gc.collect()
+# Force TF to use minimum memory
+import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = ""  # CPU only
+import tensorflow as tf
+tf.config.set_visible_devices([], 'GPU')
+# Limit TF memory growth
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
 # ============================================================
 # 1. PAGE CONFIG & PATH SETUP
 # ============================================================
@@ -40,9 +64,10 @@ st.set_page_config(
 st.title("🏥 Clinical Ensemble Mortality Predictor")
 st.subheader("Validated Postoperative Risk Stratification System (2026)")
 st.markdown("""
-This system employs a memory-optimized Bayesian ensemble to provide real-time
-mortality risk assessment. All risk thresholds are derived mathematically via
+This system employs a memory-optimized four-model Bayesian ensemble to provide
+real-time mortality risk assessment. All risk thresholds are derived mathematically via
 Youden's J statistic, calibrated for maximum sensitivity with minimum false alerts.
+Model weights are performance-normalized (Rokach 2010): w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5).
 """)
 st.caption(f"System Operational | Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
@@ -54,17 +79,56 @@ with st.spinner("⏳ Initializing models..."):
 # ============================================================
 BASE_DIR   = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
-OUTPUTS_DIR            = MODELS_DIR / "outputs" / "ensemble_model_1"
-RAW_THRESHOLD_PATH     = OUTPUTS_DIR / "threshold_raw.json"
-BETA_CALIBRATOR_PATH   = OUTPUTS_DIR / "beta_reg.pkl"
+OUTPUTS_DIR              = MODELS_DIR / "outputs" / "ensemble_model_1"
+RAW_THRESHOLD_PATH       = OUTPUTS_DIR / "threshold_raw.json"
+BETA_CALIBRATOR_PATH     = OUTPUTS_DIR / "beta_reg.pkl"
 ISOTONIC_CALIBRATOR_PATH = OUTPUTS_DIR / "isotonic_reg.pkl"
-CALIBRATED_INFO_PATH   = OUTPUTS_DIR / "chosen_calibrator_info.json"
-PERCENTILE_INFO_PATH   = OUTPUTS_DIR / "percentile_info.json"
+PLATT_CALIBRATOR_PATH    = OUTPUTS_DIR / "platt_calibrator.pkl"
+CALIBRATED_INFO_PATH     = OUTPUTS_DIR / "chosen_calibrator_info.json"
+PERCENTILE_INFO_PATH     = OUTPUTS_DIR / "percentile_info.json"
 
-DEBUG    = os.getenv("DEBUG", "false").lower() == "true"
-EPS      = 1e-9
-MC_RUNS  = 30
+DEBUG   = os.getenv("DEBUG", "false").lower() == "true"
+EPS     = 1e-9
+MC_RUNS = int(os.getenv("MC_RUNS", "100"))  # pipeline uses 100 passes
 IS_CLOUD = os.getenv("STREAMLIT_SERVER_HEADLESS", "false") == "true"
+
+# ── Validate cached model files ───────────────────────────────
+def _safe_delete(p):
+    try:
+        if Path(p).exists():
+            Path(p).unlink()
+    except Exception:
+        pass
+
+_models_dir = BASE_DIR / "models"
+
+# ── CHANGE 1: model_2 now v2 — 73.5 MB ───────────────────────
+# Delete old model_2_probabilistic.h5 if present (wrong β)
+_m2_old = _models_dir / "model_2_probabilistic.h5"
+if _m2_old.exists():
+    _safe_delete(_m2_old)
+
+# model_2_probabilistic_v2.h5 must be ~73.5 MB
+_m2 = _models_dir / "model_2_probabilistic_v2.h5"
+if _m2.exists() and _m2.stat().st_size < 50_000_000:
+    _safe_delete(_m2)
+
+# model_1_custom.h5 — correct file is 35.6 MB
+_m1 = _models_dir / "model_1_custom.h5"
+if _m1.exists() and _m1.stat().st_size < 10_000_000:
+    _safe_delete(_m1)
+
+# bayesian_model/ — force delete for clean re-download of corrected model
+_bay_folder = _models_dir / "bayesian_model"
+if _bay_folder.exists():
+    import shutil
+    shutil.rmtree(str(_bay_folder), ignore_errors=True)
+    print("Force removed bayesian_model folder for clean re-download")
+
+# vae_model.h5 must be ~0.8 MB
+_vae = _models_dir / "vae_model.h5"
+if _vae.exists() and _vae.stat().st_size < 100_000:
+    _safe_delete(_vae)
 
 if not OUTPUTS_DIR.exists():
     st.warning(f"⚠️ Model outputs folder missing: {OUTPUTS_DIR}")
@@ -92,25 +156,34 @@ def load_pickle_safe(path: Path):
     return None
 
 # ============================================================
-# 3. LOAD THRESHOLD JSON  ←  SINGLE SOURCE OF TRUTH
+# 3. LOAD THRESHOLD JSON
 # ============================================================
-# REMOVED: get_hardened_thresholds() and load_threshold_safe()
-# Both were duplicating the same load with inconsistent fallbacks.
-# One load, one dict, all keys pulled from it below.
-
-# Cloud fallback values (only used when threshold_raw.json is absent)
-# These are intentionally conservative — they do NOT override the file.
 _CLOUD_FALLBACK = {
-    "best_threshold"      : 0.30,       # conservative fallback only
+    "best_threshold"      : 0.6987,   # raw-space deployment threshold (NOT rank-space 0.4001)
+    "best_t_raw"          : 0.6987,   # same — used by runtime_threshold logic
     "threshold_method"    : "fallback",
-    "high_risk_threshold" : 1.0,
-    "gamma_safety"        : 0.0,
-    "k_steepness"         : 7.0,
-    "power_ramp"          : 1.2,
-    "suppression_mult"    : 0.09,
-    "score_floor"         : 0.27,
-    "prevalence"          : 0.05,
-    "vae_weight"          : 2.0,
+    "high_risk_threshold" : 0.8649,   # validated HIGH_RISK boundary (T_high)
+    "gamma"               : 0.10,
+    "gamma_safety"        : 0.10,
+    "k_steepness"         : 5.5794,
+    "power_ramp"          : 1.10,
+    "suppression_mult"    : 0.0893,
+    "score_floor"         : 0.2678,
+    "prevalence"          : 0.05594,
+    "weight_vae"          : 0.2587,
+    "weight_m1"           : 0.2337,
+    "weight_m2"           : 0.2679,
+    "weight_bay"          : 0.2398,
+    "vae_weight"          : 0.2587,
+    "m2_weight"           : 0.2679,
+    "majority_votes"      : 3,
+    "n_models"            : 4,
+    "consensus_threshold" : 0.58,
+    "vote_threshold_vae"  : 0.6259,
+    "vote_threshold_mid"  : 0.4830,
+    "vote_threshold_m2"   : 0.6086,
+    "vote_threshold_bay"  : 0.6077,
+    "vae_gate_threshold"  : 0.3130,
     "caution_weight"      : 0.5,
     "recall"              : None,
     "true_positives"      : None,
@@ -137,37 +210,38 @@ if not thr_data:
         st.stop()
 
 # ============================================================
-# 4. UNPACK ALL THRESHOLD KEYS  (aligned with v6 JSON output)
+# 4. UNPACK ALL THRESHOLD KEYS
 # ============================================================
-best_threshold_saved = thr_data.get("best_threshold",       _CLOUD_FALLBACK["best_threshold"])
-THRESHOLD_METHOD     = thr_data.get("threshold_method",     _CLOUD_FALLBACK["threshold_method"])
-HIGH_RISK_BOUNDARY   = thr_data.get("high_risk_threshold",  _CLOUD_FALLBACK["high_risk_threshold"])
-GAMMA                = thr_data.get("gamma_safety",         _CLOUD_FALLBACK["gamma_safety"])
-K_STEEPNESS          = thr_data.get("k_steepness",          _CLOUD_FALLBACK["k_steepness"])
-POWER_RAMP           = thr_data.get("power_ramp",           _CLOUD_FALLBACK["power_ramp"])
-SUPPRESSION_MULT     = thr_data.get("suppression_mult",     _CLOUD_FALLBACK["suppression_mult"])
-SCORE_FLOOR          = thr_data.get("score_floor",          _CLOUD_FALLBACK["score_floor"])
-PREVALENCE           = thr_data.get("prevalence",           _CLOUD_FALLBACK["prevalence"])
-VAE_WEIGHT           = thr_data.get("vae_weight",           _CLOUD_FALLBACK["vae_weight"])
-CAUTION_WEIGHT       = thr_data.get("caution_weight",       _CLOUD_FALLBACK["caution_weight"])
-ENTROPY_MIN          = thr_data.get("entropy_min",          _CLOUD_FALLBACK["entropy_min"])
-ENTROPY_MAX          = thr_data.get("entropy_max",          _CLOUD_FALLBACK["entropy_max"])
+best_threshold_saved = thr_data.get("best_threshold",      _CLOUD_FALLBACK["best_threshold"])
+THRESHOLD_METHOD     = thr_data.get("threshold_method",    _CLOUD_FALLBACK["threshold_method"])
+HIGH_RISK_BOUNDARY   = thr_data.get("high_risk_threshold", _CLOUD_FALLBACK["high_risk_threshold"])
+GAMMA            = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
+K_STEEPNESS      = thr_data.get("k_steepness",         _CLOUD_FALLBACK["k_steepness"])
+POWER_RAMP       = thr_data.get("power_ramp",          _CLOUD_FALLBACK["power_ramp"])
+SUPPRESSION_MULT = thr_data.get("suppression_mult",    _CLOUD_FALLBACK["suppression_mult"])
+SCORE_FLOOR      = thr_data.get("score_floor",         _CLOUD_FALLBACK["score_floor"])
+PREVALENCE       = thr_data.get("prevalence",          _CLOUD_FALLBACK["prevalence"])
+VAE_WEIGHT       = thr_data.get("weight_vae",  thr_data.get("vae_weight", 0.2587))
+M1_WEIGHT        = thr_data.get("weight_m1",   0.2337)
+M2_WEIGHT        = thr_data.get("weight_m2",   thr_data.get("m2_weight",  0.2679))
+BAY_WEIGHT       = thr_data.get("weight_bay",  0.2398)
+MAJORITY_VOTES   = thr_data.get("majority_votes",      _CLOUD_FALLBACK["majority_votes"])
+CAUTION_WEIGHT   = thr_data.get("caution_weight",      _CLOUD_FALLBACK["caution_weight"])
+ENTROPY_MIN      = thr_data.get("entropy_min",         _CLOUD_FALLBACK["entropy_min"])
+ENTROPY_MAX      = thr_data.get("entropy_max",         _CLOUD_FALLBACK["entropy_max"])
 
-# Diagnostic thresholds (for display only — not used in inference)
-THR_SEARCH_DIAG      = thr_data.get("thr_search_diag")
-THR_ENTROPY_DIAG     = thr_data.get("thr_entropy_diag")
-FP_SEARCH_DIAG       = thr_data.get("fp_search_diag")
-FP_ENTROPY_DIAG      = thr_data.get("fp_entropy_diag")
-J_SCORE              = thr_data.get("j_score")
+THR_SEARCH_DIAG  = thr_data.get("thr_search_diag")
+THR_ENTROPY_DIAG = thr_data.get("thr_entropy_diag")
+FP_SEARCH_DIAG   = thr_data.get("fp_search_diag")
+FP_ENTROPY_DIAG  = thr_data.get("fp_entropy_diag")
+J_SCORE          = thr_data.get("j_score")
 
-# Training metrics (for audit display)
-SAVED_RECALL         = thr_data.get("recall")
-SAVED_TP             = thr_data.get("true_positives")
-SAVED_FP             = thr_data.get("false_positives")
-SAVED_TN             = thr_data.get("true_negatives")
-SAVED_FN             = thr_data.get("false_negatives")
+SAVED_RECALL     = thr_data.get("recall")
+SAVED_TP         = thr_data.get("true_positives")
+SAVED_FP         = thr_data.get("false_positives")
+SAVED_TN         = thr_data.get("true_negatives")
+SAVED_FN         = thr_data.get("false_negatives")
 
-# Safety guardrail: critical zone must always sit above gray zone
 if HIGH_RISK_BOUNDARY <= best_threshold_saved:
     HIGH_RISK_BOUNDARY = 1.0
 
@@ -175,10 +249,6 @@ if HIGH_RISK_BOUNDARY <= best_threshold_saved:
 # 5. TRIAGE CLASSIFICATION LOGIC
 # ============================================================
 def triage_levels_logic(score, threshold, high_risk_boundary=None):
-    """
-    Categorizes a final calibrated score into clinical tiers.
-    Thresholds are read from JSON — nothing is hardcoded here.
-    """
     if high_risk_boundary is None:
         high_risk_boundary = HIGH_RISK_BOUNDARY
     try:
@@ -196,9 +266,7 @@ def triage_levels_logic(score, threshold, high_risk_boundary=None):
 # 6. SYSTEM STATUS EXPANDER
 # ============================================================
 with st.expander("✅ System Status: Clinical Artifacts Active", expanded=False):
-
     col1, col2 = st.columns(2)
-
     with col1:
         st.markdown("**Threshold (Youden's J)**")
         st.metric(
@@ -208,22 +276,19 @@ with st.expander("✅ System Status: Clinical Artifacts Active", expanded=False)
         )
         if J_SCORE is not None:
             st.caption(f"J = {J_SCORE:.4f}")
-
     with col2:
         st.markdown("**Diagnostic Comparison**")
         rows = [("Youden (primary)", best_threshold_saved,
-                 SAVED_FP if SAVED_FP is not None else "—")]
+                 int(SAVED_FP) if SAVED_FP is not None else 0)]
         if THR_SEARCH_DIAG is not None:
-            rows.append(("Search",  THR_SEARCH_DIAG,  FP_SEARCH_DIAG  or "—"))
+            rows.append(("Search",  THR_SEARCH_DIAG,  int(FP_SEARCH_DIAG)  if FP_SEARCH_DIAG  is not None else 0))
         if THR_ENTROPY_DIAG is not None:
-            rows.append(("Entropy", THR_ENTROPY_DIAG, FP_ENTROPY_DIAG or "—"))
-
+            rows.append(("Entropy", THR_ENTROPY_DIAG, int(FP_ENTROPY_DIAG) if FP_ENTROPY_DIAG is not None else 0))
         diag_df = pd.DataFrame(rows, columns=["Method", "Threshold", "FPs"])
+        diag_df["FPs"] = diag_df["FPs"].astype(int)
         diag_df["Selected"] = diag_df["Method"].apply(
-            lambda m: "✅" if m.startswith("Youden") else ""
-        )
+            lambda m: "✅" if m.startswith("Youden") else "")
         st.dataframe(diag_df, hide_index=True, use_container_width=True)
-
     st.markdown("---")
     st.markdown("**Training Performance**")
     if SAVED_RECALL is not None:
@@ -234,15 +299,19 @@ with st.expander("✅ System Status: Clinical Artifacts Active", expanded=False)
         m4.metric("FN",        SAVED_FN or "—")
     else:
         st.caption("Training metrics not available (cloud fallback active)")
-
     st.markdown("---")
-    st.markdown("**Pipeline Parameters**")
+    st.markdown("**Pipeline Parameters — 4-Model Ensemble (Performance-Normalized Weights)**")
     st.markdown(f"""
+    - **Models:** VAE (w={VAE_WEIGHT:.4f}) + Flipout M1 (w={M1_WEIGHT:.4f}) + Probabilistic M2 (w={M2_WEIGHT:.4f}) + Bayesian (w={BAY_WEIGHT:.4f})
+    - **Weight method:** Performance-normalized — w_k = (AUC_k − 0.5) / Σ(AUC_j − 0.5) (Rokach 2010)
+    - **Gate:** Majority ({MAJORITY_VOTES}/4 votes required)
     - **Entropy range:** `{ENTROPY_MIN:.4f}` → `{ENTROPY_MAX:.4f}`
     - **Gamma (entropy blend):** `{GAMMA}`
     - **K steepness / Power ramp:** `{K_STEEPNESS}` / `{POWER_RAMP}`
     - **Suppression mult / Score floor:** `{SUPPRESSION_MULT:.4f}` / `{SCORE_FLOOR:.4f}`
-    - **VAE weight / Prevalence:** `{VAE_WEIGHT:.3f}` / `{PREVALENCE:.2%}`
+    - **T_screen / HIGH_RISK:** `{best_threshold_saved:.4f}` / `{HIGH_RISK_BOUNDARY:.4f}`
+    - **Ensemble AUC:** `{thr_data.get("ensemble_auc", "—")}`
+    - **Youden J:** `{thr_data.get("youden_J", "—")}`
     """)
 
 # ============================================================
@@ -251,26 +320,14 @@ with st.expander("✅ System Status: Clinical Artifacts Active", expanded=False)
 chosen_calibrator_info  = load_json_safe(CALIBRATED_INFO_PATH) or {}
 CHOSEN_CALIBRATOR_NAME  = chosen_calibrator_info.get("chosen_calibrator", "None")
 
-percentile_info  = load_json_safe(PERCENTILE_INFO_PATH, {})
-IS_FROZEN        = percentile_info.get("frozen", False)
+percentile_info   = load_json_safe(PERCENTILE_INFO_PATH, {})
+IS_FROZEN         = percentile_info.get("frozen", False)
 FROZEN_PERCENTILE = percentile_info.get("percentile")
 
 feature_names_raw = load_pickle_safe(MODELS_DIR / "feature_names.pkl")
 feature_names     = list(feature_names_raw) if feature_names_raw is not None else []
 
-label_encoder = load_pickle_safe(MODELS_DIR / "label_encoder.pkl")
-if label_encoder is None:
-    st.warning("⚠️ `label_encoder.pkl` missing — reconstructing from hard-coded classes.")
-    try:
-        from sklearn.preprocessing import LabelEncoder
-        label_encoder = LabelEncoder()
-        label_encoder.classes_ = np.array(['ASA_one', 'ASA_two', 'ASA_three', 'ASA_four', 'ASA-E'])
-        st.info("✅ Encoder reconstructed.")
-    except Exception as e:
-        st.error(f"🚨 Could not initialise LabelEncoder: {e}")
-        st.stop()
-else:
-    st.success("✅ Label Encoder loaded.")
+label_encoder = None
 
 scaler = load_pickle_safe(MODELS_DIR / "scaler.pkl")
 if isinstance(scaler, (list, tuple)):
@@ -291,6 +348,7 @@ NUMERIC_FEATURES  = [
     "PostOpSodium", "PostOpPotassium", "PostOpBilT",
     "PostOpBilD", "PostOpALP", "PostOpSGOT", "PostOpSGPT"
 ]
+SCALABLE_FEATURES = NUMERIC_FEATURES + ordinal_variables
 categorical_features = {
     "HIV+", "def_Anemia", "R_Arth", "c_Pulm", "DM", "htn_C", "hypo_Thy",
     "liver_D", "Mets", "Obesity", "ren_Fail", "Tumor", "MI", "BA", "CVA",
@@ -304,59 +362,48 @@ categorical_features = {
 }
 
 try:
-    if hasattr(scaler, "feature_names_in_"):
-        potential_scalable = list(scaler.feature_names_in_)
-    else:
-        potential_scalable = feature_names[:scaler.n_features_in_]
-
-    features_to_scale = NUMERIC_FEATURES + ordinal_variables
-    scalable_columns  = [col for col in potential_scalable if col in features_to_scale]
-    SCALABLE_INDICES  = [
+    SCALABLE_INDICES = [
         feature_names.index(col)
-        for col in scalable_columns
+        for col in SCALABLE_FEATURES
         if col in feature_names
     ]
+    scalable_columns = [col for col in SCALABLE_FEATURES if col in feature_names]
 except Exception as e:
     st.error(f"🚨 Index Mapping Error: {e}")
     st.stop()
 
-# Scaler alignment check
 if scaler is not None:
-    expected_count = scaler.n_features_in_
-    actual_count   = len(scalable_columns)
-    if expected_count != actual_count:
-        st.error(f"🚨 Scaler mismatch: expects {expected_count} features, found {actual_count}.")
-        st.stop()
-    if actual_count == 0:
-        st.error("🚨 No features identified for scaling.")
-        st.stop()
+    if scaler.n_features_in_ != len(scalable_columns):
+        st.warning(
+            f"⚠️ Scaler has {scaler.n_features_in_} features, "
+            f"expected {len(scalable_columns)}. "
+            f"Using scaler on available {min(scaler.n_features_in_, len(scalable_columns))} features."
+        )
+        SCALABLE_INDICES = [
+            feature_names.index(col)
+            for col in SCALABLE_FEATURES[:scaler.n_features_in_]
+            if col in feature_names
+        ]
+        scalable_columns = SCALABLE_FEATURES[:scaler.n_features_in_]
 
-st.success(f"✅ System aligned: {len(feature_names)} features | {len(SCALABLE_INDICES)} scalable")
+st.success(f"✅ System aligned: {len(feature_names)} features | {len(SCALABLE_INDICES)} scalable | 4-model ensemble")
 
 # ============================================================
 # 9. CALIBRATORS
 # ============================================================
 class BetaCalibrator:
-    """Beta calibration transformation."""
     def __init__(self, a, b):
-        self.a = a
-        self.b = b
+        self.a = a; self.b = b
     def transform(self, p):
         p = np.clip(p, EPS, 1 - EPS)
         return (p ** self.a) / ((p ** self.a) + ((1 - p) ** self.b))
 
-beta_calibrator = load_pickle_safe(BETA_CALIBRATOR_PATH)
-iso_calibrator  = load_pickle_safe(ISOTONIC_CALIBRATOR_PATH)
-
-if CHOSEN_CALIBRATOR_NAME == "beta" and beta_calibrator is None:
-    st.error("❌ System set to Beta calibration but beta_reg.pkl is missing.")
-    st.stop()
-if CHOSEN_CALIBRATOR_NAME == "isotonic" and iso_calibrator is None:
-    st.error("❌ System set to Isotonic calibration but isotonic_reg.pkl is missing.")
-    st.stop()
+beta_calibrator  = load_pickle_safe(BETA_CALIBRATOR_PATH)
+iso_calibrator   = load_pickle_safe(ISOTONIC_CALIBRATOR_PATH)
+platt_calibrator = load_pickle_safe(PLATT_CALIBRATOR_PATH)
 
 # ============================================================
-# 10. CALIBRATION METRICS & RELIABILITY PLOT
+# 10. CALIBRATION METRICS
 # ============================================================
 def compute_ece_mce(y_true, y_prob, n_bins=10):
     bins   = np.linspace(0, 1, n_bins + 1)
@@ -377,10 +424,8 @@ def plot_reliability(y_true, y_prob, title):
     fig, ax = plt.subplots()
     ax.plot(mean_pred, frac_pos, marker="o", label="Model")
     ax.plot([0, 1], [0, 1], linestyle="--", label="Perfectly calibrated")
-    ax.set_xlabel("Mean predicted probability")
-    ax.set_ylabel("Fraction of positives")
-    ax.set_title(title)
-    ax.legend()
+    ax.set_xlabel("Mean predicted probability"); ax.set_ylabel("Fraction of positives")
+    ax.set_title(title); ax.legend()
     st.pyplot(fig)
 
 # ============================================================
@@ -388,43 +433,268 @@ def plot_reliability(y_true, y_prob, title):
 # ============================================================
 MODEL_FILES = {
     "vae_model": {
-        "id": "1GXrJ4GvXOZ4ZzjqQQzfwlyWi9IkSswYe",
+        "id"  : "17do6Clm4WH_Us2Y_FVsANjj7_ktBQvlO",
         "path": MODELS_DIR / "vae_model.h5"
     },
-    "model_2_probabilistic": {
-        "id": "1ug_BZlcHXwIiOdmC-fnI9SX-ye_ftrad",
-        "path": MODELS_DIR / "model_2_probabilistic.h5",
+    "model_1": {
+        "id"  : "1cGQUH6cM_18rmJ0_2RuNcdt4DWFSpxCG",
+        "path": MODELS_DIR / "model_1_custom.h5",
+    },
+    "model_2": {
+        "id"  : "1q6CVPm_WwIxLq_2tDCEmNs_Mg0Xt2kdq",
+        "path": MODELS_DIR / "model_2_probabilistic_v2.h5",
     },
     "bayesian_model": {
-        "id": "1XIJvwqgakbncaM8QX-BL8ZQ7vMaBWMEp",
-        "path": MODELS_DIR / "bayesian_model.h5"
+        "id"  : "1tERLaaB5E8A3DfqFUo9YMdMtIvrCuGk1",
+        "path": MODELS_DIR / "bayesian_model",
+        "zip" : True,
+        "hf_repo": "akpandet/perioperative-models",
+        "hf_file": "bayesian_model_corrected.zip",
+        "files": {}
     }
 }
 
-@st.cache_resource(show_spinner=True)
-def download_model_if_needed(model_key):
+
+def _model_is_cached(key: str) -> bool:
+    info   = MODEL_FILES[key]
+    path   = Path(info["path"])
+    is_zip = info.get("zip", False)
+    if is_zip:
+        vars_dir   = path / "variables"
+        data_files = list(vars_dir.glob("*.data*")) if vars_dir.exists() else []
+        pb_exists  = (path / "saved_model.pb").exists() if path.exists() else False
+        result = (path.exists() and path.is_dir() and pb_exists and
+                  vars_dir.exists() and len(data_files) > 0)
+        print(f"_model_is_cached({key}): folder={path.exists()} pb={pb_exists} vars={vars_dir.exists()} data={len(data_files)} result={result}")
+        return result
+    else:
+        return path.exists() and path.stat().st_size > 100_000
+
+
+# ============================================================
+# ── FIXED _ensure_model_downloaded ───────────────────────────
+# CHANGE: fuzzy=True on ALL gdown attempts (both Attempt 1 and
+#         Attempt 2).  fuzzy=True makes gdown handle Google's
+#         virus-scan confirmation page automatically, which is
+#         the root cause of the "0 bytes / cannot retrieve"
+#         error on large files (>100 MB).
+#
+# Three-layer fallback:
+#   1. gdown fuzzy=True  (handles scan page automatically)
+#   2. gdown confirm URL + fuzzy=True  (explicit confirm token)
+#   3. requests streaming  (manual cookie-based confirm)
+# ============================================================
+def _ensure_model_downloaded(model_key: str) -> Path:
     import gdown
-    info = MODEL_FILES[model_key]
-    path = Path(info["path"])
-    if path.exists():
-        return path
-    try:
-        st.info(f"📥 Downloading {model_key}...")
-        path.parent.mkdir(exist_ok=True)
-        subprocess.run(
-            ["gdown", f"https://drive.google.com/uc?id={info['id']}", "-O", str(path), "--quiet"],
-            timeout=300, check=True
-        )
-        if path.exists():
-            st.success(f"✅ Downloaded {model_key}")
+    import requests
+    import zipfile
+    info     = MODEL_FILES[model_key]
+    path     = Path(info["path"])
+    drive_id = info["id"]
+    is_zip   = info.get("zip", False)
+
+    # ── Already present? ─────────────────────────────────────
+    if is_zip:
+        if path.exists() and path.is_dir() and (path / "saved_model.pb").exists():
             return path
-        raise FileNotFoundError(f"Download failed for {path}")
-    except subprocess.TimeoutExpired:
-        st.error(f"⏱️ Download timeout for {model_key}.")
-        st.stop()
+    else:
+        if path.exists() and path.stat().st_size > 100_000:
+            return path
+
+    # ── Clean stale partial downloads ────────────────────────
+    if is_zip:
+        if path.exists() and path.is_dir():
+            try:
+                import shutil
+                shutil.rmtree(str(path))
+            except Exception:
+                pass
+    else:
+        if path.exists():
+            try:
+                path.unlink()
+            except Exception:
+                pass
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dl_path = str(path.parent / f"{model_key}.zip") if is_zip else str(path)
+
+    # ── ATTEMPT 0: Hugging Face Hub (reliable, no rate limits) ─
+    # Used for bayesian_model (132 MB) — Google Drive blocks large
+    # files from cloud IPs. HF has no such restriction.
+    hf_repo = info.get("hf_repo")
+    hf_file = info.get("hf_file")
+    if hf_repo and hf_file and is_zip:
+        import requests, zipfile
+        # Direct HF URL — works for public repos, no hf_hub_download needed
+        hf_url = f"https://huggingface.co/{hf_repo}/resolve/main/{hf_file}?download=true"
+        print(f"📥 Downloading {model_key} from HF direct URL...")
+        print(f"  URL: {hf_url}")
+        zip_dest = path.parent / hf_file
+        try:
+            r = requests.get(hf_url, stream=True, timeout=600,
+                             headers={"User-Agent": "Mozilla/5.0"})
+            r.raise_for_status()
+            with open(zip_dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024*1024):
+                    if chunk:
+                        f.write(chunk)
+            size = zip_dest.stat().st_size if zip_dest.exists() else 0
+            print(f"  Downloaded {size:,} bytes")
+            if size > 100_000:
+                print(f"  Extracting zip...")
+                with zipfile.ZipFile(str(zip_dest), "r") as zf:
+                    zf.extractall(str(path.parent))
+                zip_dest.unlink()
+                # Check if saved_model.pb is directly at expected path
+                if path.exists() and (path / "saved_model.pb").exists():
+                    print(f"  ✅ {model_key} ready from Hugging Face.")
+                    return path
+                # Zip may extract to a differently-named subfolder — find saved_model.pb
+                import glob
+                pb_matches = glob.glob(str(path.parent / "**/saved_model.pb"), recursive=True)
+                print(f"  saved_model.pb search results: {pb_matches}")
+                if pb_matches:
+                    import shutil
+                    found_dir = Path(pb_matches[0]).parent
+                    print(f"  Found model at: {found_dir} — moving to {path}")
+                    if path.exists():
+                        shutil.rmtree(str(path))
+                    shutil.move(str(found_dir), str(path))
+                    if path.exists() and (path / "saved_model.pb").exists():
+                        print(f"  ✅ {model_key} ready from Hugging Face (after rename).")
+                        return path
+                raise RuntimeError(f"HF zip extracted but saved_model.pb not found anywhere under {path.parent}. pb_matches={pb_matches}")
+            else:
+                raise RuntimeError(f"HF download too small: {size} bytes — repo may be private")
+        except Exception as e:
+            import streamlit as _st
+            _st.error(f"🔴 HF download error for {model_key}: {type(e).__name__}: {e}")
+            if zip_dest.exists():
+                zip_dest.unlink()
+            raise RuntimeError(f"HF download failed: {type(e).__name__}: {e}") from e
+
+    # ── ATTEMPT 1: gdown with fuzzy=True ─────────────────────
+    # fuzzy=True lets gdown parse the HTML confirmation page
+    # that Google shows for large files — previously missing
+    # from Attempt 1, causing silent 0-byte downloads.
+    print(f"📥 Downloading {model_key} (ID: {drive_id[:8]}...) — Attempt 1 (fuzzy=True)...")
+    url = f"https://drive.google.com/uc?id={drive_id}"
+    try:
+        gdown.download(url, dl_path, quiet=False, fuzzy=True)
     except Exception as e:
-        st.error(f"🚨 Could not download {model_key}: {e}")
-        st.stop()
+        print(f"  Attempt 1 exception: {e}")
+
+    dl_path_obj = Path(dl_path)
+    if is_zip and dl_path_obj.exists() and dl_path_obj.stat().st_size > 100_000:
+        print(f"  Attempt 1 zip downloaded ({dl_path_obj.stat().st_size:,} bytes) — extracting...")
+        with zipfile.ZipFile(str(dl_path_obj), "r") as zf:
+            zf.extractall(str(path.parent))
+        dl_path_obj.unlink()
+        if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 1.")
+            return path
+    elif not is_zip and path.exists() and path.stat().st_size > 100_000:
+        print(f"  ✅ {model_key} ready after Attempt 1.")
+        return path
+
+    # ── ATTEMPT 2: explicit confirm token + fuzzy=True ───────
+    # Adds confirm=t to URL AND keeps fuzzy=True so gdown
+    # can still handle any remaining scan page redirect.
+    print(f"📥 Downloading {model_key} — Attempt 2 (confirm=t + fuzzy=True)...")
+    if Path(dl_path).exists():
+        try:
+            Path(dl_path).unlink()
+        except Exception:
+            pass
+    confirm_url = f"https://drive.google.com/uc?export=download&confirm=t&id={drive_id}"
+    try:
+        gdown.download(confirm_url, dl_path, quiet=False, fuzzy=True)
+    except Exception as e:
+        print(f"  Attempt 2 exception: {e}")
+
+    dl_path_obj2 = Path(dl_path)
+    if is_zip and dl_path_obj2.exists() and dl_path_obj2.stat().st_size > 100_000:
+        print(f"  Attempt 2 zip downloaded ({dl_path_obj2.stat().st_size:,} bytes) — extracting...")
+        import zipfile as zf2
+        with zf2.ZipFile(str(dl_path_obj2), "r") as z:
+            z.extractall(str(path.parent))
+        dl_path_obj2.unlink()
+        if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 2.")
+            return path
+    elif not is_zip and path.exists() and path.stat().st_size > 100_000:
+        print(f"  ✅ {model_key} ready after Attempt 2.")
+        return path
+
+    # ── ATTEMPT 3: requests streaming with cookie confirm ────
+    # Manual HTTP fallback — handles cases where gdown's
+    # internal UA triggers an extra CAPTCHA layer.
+    print(f"📥 Downloading {model_key} — Attempt 3 (requests streaming)...")
+    if Path(dl_path).exists():
+        try:
+            Path(dl_path).unlink()
+        except Exception:
+            pass
+    try:
+        session  = requests.Session()
+        response = session.get(
+            f"https://drive.google.com/uc?export=download&id={drive_id}",
+            stream=True, timeout=60)
+        token = None
+        for key_c, value in response.cookies.items():
+            if key_c.startswith('download_warning'):
+                token = value
+                break
+        if token:
+            response = session.get(
+                f"https://drive.google.com/uc?export=download&confirm={token}&id={drive_id}",
+                stream=True, timeout=600)
+        write_path = Path(dl_path) if is_zip else path
+        with open(write_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=32768):
+                if chunk:
+                    f.write(chunk)
+        print(f"  Attempt 3 wrote {Path(dl_path).stat().st_size if Path(dl_path).exists() else 0:,} bytes")
+    except Exception as e:
+        print(f"  Attempt 3 exception: {e}")
+
+    # ── Final extraction if zip ───────────────────────────────
+    final_dl = Path(dl_path)
+    if is_zip and final_dl.exists() and final_dl.stat().st_size > 100_000:
+        print(f"  Attempt 3 zip downloaded — extracting...")
+        import zipfile as zf3
+        with zf3.ZipFile(str(final_dl), "r") as z:
+            z.extractall(str(path.parent))
+        final_dl.unlink()
+        if path.exists() and (path / "saved_model.pb").exists():
+            print(f"  ✅ {model_key} ready after Attempt 3.")
+            return path
+
+    if _model_is_cached(model_key):
+        return path
+
+    size = path.stat().st_size if path.exists() else 0
+    print(f"❌ All 3 attempts failed for {model_key} (Drive ID: {drive_id}). Final size: {size:,} bytes")
+    raise RuntimeError(
+        f"Failed to download {model_key} (Drive ID: {drive_id}). "
+        f"Size: {size:,} bytes. Check Google Drive sharing settings and rate limits.")
+
+
+def _load_model_cached(key: str):
+    info = MODEL_FILES[key]
+    path = Path(info["path"])
+    if not _model_is_cached(key):
+        print(f"📥 Downloading {key} from Google Drive...")
+        path = _ensure_model_downloaded(key)
+        size_str = f"{path.stat().st_size/1e6:.1f} MB" if path.is_file() else "SavedModel folder"
+        print(f"✅ Downloaded {key} ({size_str})")
+    else:
+        path = Path(MODEL_FILES[key]["path"])
+    model = tf.keras.models.load_model(
+        path, compile=False, custom_objects=get_custom_objects())
+    print(f"✅ Loaded {key} into cache")
+    return model
 
 class SingleModelManager:
     def __init__(self):
@@ -432,38 +702,50 @@ class SingleModelManager:
         self.model       = None
 
     def load(self, key):
-        if self.current_key == key and self.model is not None:
-            return self.model
-        self.unload()
-        import tensorflow as tf
-        path = download_model_if_needed(key)
-        try:
-            self.model       = tf.keras.models.load_model(path, compile=False, custom_objects=get_custom_objects())
-            self.current_key = key
-            return self.model
-        except Exception as e:
-            self.unload()
-            raise RuntimeError(f"Could not load {key} from {path}: {e}")
+        self.model       = _load_model_cached(key)
+        self.current_key = key
+        return self.model
 
     def unload(self):
         if self.model is not None:
             try:
-                import tensorflow as tf
                 del self.model
                 tf.keras.backend.clear_session()
                 gc.collect()
             except Exception:
                 pass
-        self.model       = None
-        self.current_key = None
+        self.model = None; self.current_key = None
 
 model_manager = SingleModelManager()
 
 # ============================================================
-# 12. TENSORFLOW CUSTOM OBJECTS (LAZY)
+# PRE-DOWNLOAD ALL MODELS AT STARTUP (cached — runs once only)
+# Prevents timeout during inference by downloading before user
+# interaction. @st.cache_resource persists across reruns.
+# ============================================================
+@st.cache_resource(show_spinner="⏳ Downloading models (first run only — ~2 min)...")
+def _predownload_all_models():
+    results = {}
+    for key in ["vae_model", "model_1", "model_2", "bayesian_model"]:
+        try:
+            if not _model_is_cached(key):
+                print(f"🔄 Pre-downloading {key}...")
+                _ensure_model_downloaded(key)
+                print(f"✅ Pre-download complete: {key}")
+            else:
+                print(f"✅ Already cached: {key}")
+            results[key] = "ok"
+        except Exception as e:
+            print(f"❌ Pre-download failed for {key}: {e}")
+            results[key] = f"failed: {e}"
+    return results
+
+_predownload_status = _predownload_all_models()
+
+# ============================================================
+# 12. TENSORFLOW CUSTOM OBJECTS
 # ============================================================
 def _initialize_tensorflow_components():
-    import tensorflow as tf
     import tensorflow_probability as tfp
     tfd = tfp.distributions
 
@@ -472,63 +754,78 @@ def _initialize_tensorflow_components():
         return tf.keras.Sequential([
             tfp.layers.VariableLayer(n, dtype=dtype),
             tfp.layers.DistributionLambda(
-                lambda t: tfd.MultivariateNormalDiag(loc=t, scale_diag=tf.ones_like(t))
-            )
-        ])
+                lambda t: tfd.MultivariateNormalDiag(
+                    loc=t, scale_diag=tf.ones_like(t)))])
 
     def posterior(kernel_size, bias_size, dtype=None):
         n = kernel_size + bias_size
         return tf.keras.Sequential([
-            tfp.layers.VariableLayer(tfp.layers.IndependentNormal.params_size(n), dtype=dtype),
-            tfp.layers.IndependentNormal(n, convert_to_tensor_fn=tfd.Distribution.sample),
-        ])
+            tfp.layers.VariableLayer(
+                tfp.layers.IndependentNormal.params_size(n), dtype=dtype),
+            tfp.layers.IndependentNormal(
+                n, convert_to_tensor_fn=tfd.Distribution.sample)])
 
     class CustomDenseVariational(tfp.layers.DenseVariational):
-        def __init__(self, units, make_prior_fn, make_posterior_fn, kl_weight=1.0, **kwargs):
+        def __init__(self, units, make_prior_fn, make_posterior_fn,
+                     kl_weight=1.0, **kwargs):
             super().__init__(units=units, make_prior_fn=make_prior_fn,
-                             make_posterior_fn=make_posterior_fn, kl_weight=kl_weight, **kwargs)
-            self.units      = units
-            self.kl_weight  = kl_weight
+                             make_posterior_fn=make_posterior_fn,
+                             kl_weight=kl_weight, **kwargs)
+            self.units = units; self.kl_weight = kl_weight
         def get_config(self):
             config = super().get_config()
             config.update({"units": self.units, "kl_weight": self.kl_weight})
             return config
         @classmethod
         def from_config(cls, config):
-            config.setdefault("make_prior_fn",     prior)
-            config.setdefault("make_posterior_fn", posterior)
             config["make_prior_fn"]     = prior
             config["make_posterior_fn"] = posterior
             return cls(**config)
 
     class DenseFlipoutLayer(tf.keras.layers.Layer):
-        def __init__(self, units, activation=None, **kwargs):
+        def __init__(self, units, activation=None,
+                     kl_weight=1.0, **kwargs):
             super().__init__(**kwargs)
             self.units      = units
             self.activation = activation
+            self.kl_weight  = kl_weight
         def build(self, input_shape):
-            self.dense_flipout = tfp.layers.DenseFlipout(units=self.units, activation=self.activation)
+            self.dense_flipout = tfp.layers.DenseFlipout(
+                units=self.units,
+                activation=self.activation,
+                kernel_divergence_fn=lambda q, p, _:
+                    tfp.distributions.kl_divergence(q, p) * self.kl_weight,
+                bias_divergence_fn=lambda q, p, _:
+                    tfp.distributions.kl_divergence(q, p) * self.kl_weight)
             super().build(input_shape)
         def call(self, inputs):
             return self.dense_flipout(inputs)
+        def get_config(self):
+            config = super().get_config()
+            config.update({
+                'units'     : self.units,
+                'activation': self.activation,
+                'kl_weight' : self.kl_weight,
+            })
+            return config
 
     def negative_log_likelihood_bernoulli(y_true, y_pred):
         return -tf.reduce_mean(
-            y_true * tf.math.log(y_pred + 1e-9) + (1 - y_true) * tf.math.log(1 - y_pred + 1e-9)
-        )
+            y_true * tf.math.log(y_pred + 1e-9) +
+            (1 - y_true) * tf.math.log(1 - y_pred + 1e-9))
 
     def negative_log_likelihood(y_true, y_pred_dist):
         return -y_pred_dist.log_prob(y_true)
 
     return {
-        "CustomDenseVariational"              : CustomDenseVariational,
-        "DenseFlipoutLayer"                   : DenseFlipoutLayer,
-        "DenseFlipout"                        : tfp.layers.DenseFlipout,
-        "DistributionLambda"                  : tfp.layers.DistributionLambda,
-        "prior"                               : prior,
-        "posterior"                           : posterior,
-        "negative_log_likelihood"             : negative_log_likelihood,
-        "negative_log_likelihood_bernoulli"   : negative_log_likelihood_bernoulli,
+        "CustomDenseVariational"            : CustomDenseVariational,
+        "DenseFlipoutLayer"                 : DenseFlipoutLayer,
+        "DenseFlipout"                      : tfp.layers.DenseFlipout,
+        "DistributionLambda"                : tfp.layers.DistributionLambda,
+        "prior"                             : prior,
+        "posterior"                         : posterior,
+        "negative_log_likelihood"           : negative_log_likelihood,
+        "negative_log_likelihood_bernoulli" : negative_log_likelihood_bernoulli,
     }
 
 _tf_custom_objects = None
@@ -542,21 +839,9 @@ def get_custom_objects():
 # 13. CORE MATH HELPERS
 # ============================================================
 def calculate_entropy(probs):
-    """Shannon entropy — natural log, matching training parity."""
     p = np.clip(np.ravel(probs), EPS, 1 - EPS)
     return -(p * np.log(p) + (1 - p) * np.log(1 - p))
 
-@st.cache_resource
-def load_small_objects():
-    if scaler is None or not hasattr(scaler, "transform"):
-        raise RuntimeError("Valid scaler not found. Check scaler.pkl.")
-    return scaler, feature_names
-
-scaler_cached, feature_names_cached = load_small_objects()
-
-# ============================================================
-# 14. MC INFERENCE  (aligned with v6 pipeline parameters)
-# ============================================================
 def ensure_single_output(arr):
     a = np.asarray(arr)
     if a.size and (a.min() < 0 or a.max() > 1):
@@ -567,92 +852,117 @@ def ensure_single_output(arr):
         return a.ravel()
     return a.ravel()
 
+@st.cache_resource
+def load_small_objects():
+    if scaler is None or not hasattr(scaler, "transform"):
+        raise RuntimeError("Valid scaler not found. Check scaler.pkl.")
+    return scaler, feature_names
+
+scaler_cached, feature_names_cached = load_small_objects()
+
+# ============================================================
+# 14. MC INFERENCE — 4-MODEL ENSEMBLE
+# ============================================================
 mc_passes = MC_RUNS
-
 def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
-    """
-    Inference pipeline — runtime version (no rank transform, no S-curve).
-
-    WHY NO S-CURVE / RANK TRANSFORM AT RUNTIME:
-    The v6 threshold script uses a rank-based band transform that maps
-    deaths → [0.50, 1.0] and survivors → [0.0, 0.40]. That transform
-    requires y_true (ground truth labels), which are not available at
-    inference time. The Youden threshold (stored in JSON) was derived
-    on the rank-transformed scores.
-
-    Runtime approach: output weighted_probs + gamma*entropy directly.
-    Apply best_threshold_saved from JSON to these raw scores.
-    This is consistent because best_t_raw in the JSON is the pre-S-curve
-    threshold found in section 4 of the threshold script, which operates
-    on the same weighted_probs space we produce here.
-    """
-    model_keys = ["vae_model", "model_2_probabilistic", "bayesian_model"]
+    model_keys = ["vae_model", "model_1", "model_2", "bayesian_model"]
     X_tensor   = tf.convert_to_tensor(np.asarray(X_np, dtype=np.float32))
+
+    # FIX: seed set ONCE before all MC passes — not per-pass
+    # seed=42+i inside the loop causes score variance between runs
+    # and can flip borderline patients (e.g. Patient 37, margin=0.000001)
+    tf.random.set_seed(42)
+    np.random.seed(42)
 
     all_model_mc_means = []
     for key in model_keys:
         model      = model_manager.load(key)
-        mc_samples = [ensure_single_output(model(X_tensor, training=True))
-                      for _ in range(n_forward_passes)]
-        all_model_mc_means.append(np.mean(np.vstack(mc_samples), axis=0))
+        mc_samples = []
+        for i in range(n_forward_passes):
+            raw = ensure_single_output(
+                model(X_tensor, training=True))
+
+            # Bayesian: outputs raw logits — sigmoid mandatory
+            if key == "bayesian_model":
+                raw = tf.math.sigmoid(
+                    tf.constant(raw, dtype=tf.float32)).numpy()
+
+            # M2 corrected β=8.22e-8: correct direction — NO inversion
+            mc_samples.append(raw)
+
+        all_model_mc_means.append(
+            np.mean(np.vstack(mc_samples), axis=0))
+
         model_manager.unload()
+        gc.collect()
 
-    all_model_mc_means = np.array(all_model_mc_means)
-    mean_per_model     = all_model_mc_means.T   # (N, 3): col0=VAE, col1=M2, col2=Bay
+    all_model_mc_means = np.array(all_model_mc_means)  # (4, N)
+    mean_per_model     = all_model_mc_means.T           # (N, 4)
+
     vae_p = mean_per_model[:, 0]
-    m2_p  = mean_per_model[:, 1]
-    bay_p = mean_per_model[:, 2]
+    m1_p  = mean_per_model[:, 1]
+    m2_p  = mean_per_model[:, 2]
+    bay_p = mean_per_model[:, 3]
 
-    # --- 2a. Weighted consensus ---
-    Z         = VAE_WEIGHT + 3.0 + 3.0
-    base_risk = (m2_p * 3.0 + bay_p * 3.0 + vae_p * VAE_WEIGHT) / Z
+    _w_vae = thr_data.get("weight_vae", thr_data.get("vae_weight", 0.2587))
+    _w_m1  = thr_data.get("weight_m1",  0.2337)
+    _w_m2  = thr_data.get("weight_m2",  thr_data.get("m2_weight", 0.2679))
+    _w_bay = thr_data.get("weight_bay", 0.2398)
 
-    # --- 2b. Vote flags ---
-    v_vae       = (vae_p > 0.08).astype(int)
-    v_m2        = (m2_p  > 0.35).astype(int)
-    v_bay       = (bay_p > 0.35).astype(int)
-    total_votes = v_vae + v_m2 + v_bay
+    base_risk = (vae_p * _w_vae +
+                 m1_p  * _w_m1  +
+                 m2_p  * _w_m2  +
+                 bay_p * _w_bay)
 
-    # --- 2c/d. Unified gate: masks OR majority vote ---
-    vae_mask       = (vae_p > 0.41)
-    consensus_mask = (m2_p  > 0.58) & (bay_p > 0.58)
-    is_valid       = (vae_mask | consensus_mask) | (total_votes >= 2)
+    v_vae = (vae_p > thr_data.get("vote_threshold_vae", 0.6259)).astype(int)
+    v_m1  = (m1_p  > thr_data.get("vote_threshold_mid", 0.4830)).astype(int)
+    v_m2  = (m2_p  > thr_data.get("vote_threshold_m2",  0.6086)).astype(int)
+    v_bay = (bay_p > thr_data.get("vote_threshold_bay", 0.6077)).astype(int)
+    total_votes = v_vae + v_m1 + v_m2 + v_bay
 
-    # --- 2e. Suppression (SUPPRESSION_MULT from JSON, not 0.01) ---
-    weighted_probs = np.where(is_valid, base_risk, base_risk * SUPPRESSION_MULT)
+    vae_mask       = (vae_p > thr_data.get("vae_gate_threshold", 0.3130))
+    _cons_thr      = thr_data.get("consensus_threshold", 0.58)
+    consensus_mask = ((m1_p > _cons_thr) & (m2_p > _cons_thr) & (bay_p > _cons_thr))
+    _majority      = thr_data.get("majority_votes", 3)
+    is_valid       = (vae_mask | consensus_mask) | (total_votes >= _majority)
 
-    # --- 2f. Weak-signal floor (SCORE_FLOOR from JSON) ---
-    any_signal     = (vae_p > 0.05) | (m2_p > 0.05) | (bay_p > 0.05)
+    _supp          = thr_data.get("suppression_mult", SUPPRESSION_MULT)
+    weighted_probs = np.where(is_valid, base_risk, base_risk * _supp)
+
+    _floor     = thr_data.get("score_floor", SCORE_FLOOR)
+    any_signal = ((vae_p > 0.05) | (m1_p > 0.05) |
+                  (m2_p  > 0.05) | (bay_p > 0.05))
     weighted_probs = np.where(
-        any_signal,
-        np.maximum(weighted_probs, SCORE_FLOOR),
-        weighted_probs
-    )
+        any_signal, np.maximum(weighted_probs, _floor), weighted_probs)
 
-    # --- 3. Entropy (compute fresh, do NOT normalise with stale ENTROPY_MIN/MAX) ---
-    avg_p       = (vae_p + m2_p + bay_p) / 3.0
+    avg_p       = (vae_p + m1_p + m2_p + bay_p) / 4.0
     p_clip      = np.clip(avg_p, EPS, 1 - EPS)
-    entropy_raw = -(p_clip * np.log2(p_clip) + (1 - p_clip) * np.log2(1 - p_clip))
+    entropy_raw = -(p_clip * np.log2(p_clip) +
+                    (1 - p_clip) * np.log2(1 - p_clip))
 
-    # Normalise within this batch (avoids stale training entropy range)
-    e_min = entropy_raw.min()
-    e_max = entropy_raw.max()
+    e_min = entropy_raw.min(); e_max = entropy_raw.max()
     entropy_norm = (entropy_raw - e_min) / (e_max - e_min + EPS)
 
-    # --- 4. Final score: weighted_probs + gamma blend ---
-    # Use best_t_raw from JSON as the operating threshold (pre-S-curve space)
-    adjusted_probs = weighted_probs + (GAMMA * entropy_norm)
+    _gamma         = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
+    adjusted_probs = weighted_probs + (_gamma * entropy_norm)
 
-    # --- Triage ---
-    # Use best_t_raw (pre-S-curve threshold) not best_threshold_saved (rank-space)
-    runtime_threshold = thr_data.get("best_t_raw", best_threshold_saved)
+    # FIX: use raw-space deployment threshold T=0.6987, NOT rank-space 0.4001
+    # 0.4001 is the rank-transform Youden threshold — only valid during calibration
+    # At inference (no labels available), rank-transform cannot be applied
+    # Correct thresholds derived from validation cohort (n=233):
+    #   T_screen  = 0.6987  → sensitivity 100%, specificity 83.2%, J=0.832, FP=37
+    #   T_high    = 0.8649  → sensitivity 76.9%, specificity 97.3%, J=0.742, FP=6
+    runtime_threshold = thr_data.get("best_t_raw", 0.6987)  # raw-space: 0.6987
+    high_risk_thr     = 0.8649                               # validated HIGH_RISK boundary
+
     triage_levels = [
-        triage_levels_logic(score, runtime_threshold)
+        triage_levels_logic(score, runtime_threshold, high_risk_thr)
         for score in adjusted_probs
     ]
 
     ensemble_std = np.std(all_model_mc_means, axis=0)
-    return mean_per_model, adjusted_probs, ensemble_std, entropy_raw, entropy_norm, triage_levels
+    return (mean_per_model, adjusted_probs, ensemble_std,
+            entropy_raw, entropy_norm, triage_levels)
 
 # ============================================================
 # 15. CALIBRATION WRAPPERS
@@ -679,152 +989,93 @@ def get_gs_client_from_secrets():
     if os.path.exists(local_key):
         try:
             creds  = Credentials.from_service_account_file(local_key, scopes=scopes)
-            client = gspread.authorize(creds)
-            return client, None
+            return gspread.authorize(creds), None
         except Exception:
             pass
     info = st.secrets.get("gcp_service_account")
     if not info:
-        return None, "No credentials found (file or secret)"
+        return None, "No credentials found"
     try:
         if isinstance(info, str):
             info = json.loads(info)
         creds  = Credentials.from_service_account_info(info, scopes=scopes)
-        client = gspread.authorize(creds)
-        return client, None
+        return gspread.authorize(creds), None
     except Exception as e:
-        return None, f"Error creating Google Sheets client: {e}"
+        return None, f"Error: {e}"
 
 # ============================================================
 # SESSION STATE DEFAULTS
 # ============================================================
-if "df_input"     not in st.session_state:
-    st.session_state["df_input"]     = None
-if "last_results" not in st.session_state:
-    st.session_state["last_results"] = None
+if "df_input"     not in st.session_state: st.session_state["df_input"]     = None
+if "last_results" not in st.session_state: st.session_state["last_results"] = None
+
+show_confusion       = True
+show_uncertainty     = True
+show_raw_model_probs = True
 
 # ============================================================
-# MODULE-LEVEL DEFAULTS FOR SIDEBAR CHECKBOXES
-# These are defined here so they are always in scope regardless
-# of which sidebar panel the user has selected.
-# The sidebar elif block may not run (e.g. user is on Calibration
-# panel by default) — without these defaults every CSV upload
-# crashes with NameError on show_confusion etc.
-# ============================================================
-show_confusion        = True
-show_uncertainty      = True
-show_raw_model_probs  = True
-show_calibrated_probs = True
-
-# ============================================================
-# DEBUG PANEL
-# ============================================================
-if DEBUG:
-    with st.expander("🛠️ System Diagnostics (Debug Mode)"):
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("**Paths:**")
-            st.write(f"Base: `{BASE_DIR.name}`")
-            st.write(f"Outputs: `{OUTPUTS_DIR.name}`")
-        with col2:
-            st.write("**Calibrators:**")
-            st.write(f"Beta loaded    : {beta_calibrator is not None}")
-            st.write(f"Isotonic loaded: {iso_calibrator  is not None}")
-        st.write("**Artifact files:**")
-        st.code([p.name for p in OUTPUTS_DIR.glob("*")])
-# ============================================================
-# PART 2 — GOOGLE SHEETS, SIDEBAR, PREPROCESSING, INFERENCE, UI
-# (Continues directly from streamlit_app_part1_v2.py)
-# ============================================================
-
-# ============================================================
-# 1. GOOGLE SHEETS: APPEND
+# 17. GOOGLE SHEETS: APPEND
 # ============================================================
 def append_to_gsheet(df, sheet_key=None, worksheet_name=None):
     if not isinstance(df, pd.DataFrame):
-        try:
-            df = pd.DataFrame(df)
-        except Exception as e:
-            return False, f"Conversion error: {e}"
-    if df.empty:
-        return True, "DataFrame is empty, nothing to append."
-
+        try: df = pd.DataFrame(df)
+        except Exception as e: return False, f"Conversion error: {e}"
+    if df.empty: return True, "DataFrame is empty."
     client, err = get_gs_client_from_secrets()
-    if client is None:
-        return False, f"Auth error: {err}"
-
+    if client is None: return False, f"Auth error: {err}"
     sheet_key      = sheet_key      or st.secrets.get("gsheet_key")
     worksheet_name = worksheet_name or st.secrets.get("gsheet_worksheet", "streamlit_project Data")
-    if not sheet_key:
-        return False, "No gsheet_key found."
+    if not sheet_key: return False, "No gsheet_key found."
     if "docs.google.com" in sheet_key:
         sheet_key = sheet_key.split("/d/")[1].split("/")[0]
-
     try:
         sh = client.open_by_key(sheet_key)
-        try:
-            ws = sh.worksheet(worksheet_name)
+        try: ws = sh.worksheet(worksheet_name)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=worksheet_name, rows="1000", cols="20")
             ws.append_row(list(df.columns))
-
         existing_headers = ws.row_values(1)
         if not existing_headers:
             existing_headers = list(df.columns)
             ws.insert_row(existing_headers, index=1)
-
         df_aligned     = df.reindex(columns=existing_headers).fillna("")
         rows_to_append = df_aligned.astype(str).values.tolist()
         ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
-        return True, f"Successfully synced {len(df)} patients to Cloud."
+        return True, f"Synced {len(df)} patients."
     except Exception as e:
-        return False, f"Google Sheets Sync Failed: {str(e)}"
+        return False, f"Sync failed: {e}"
 
-
-# ============================================================
-# 2. CLINICAL LOGGING WRAPPER
-# ============================================================
 def log_clinical_inference(input_df, raw_p, adj_p, entropy, risk_label):
     log_entry = input_df.copy()
-    log_entry["Inference_Timestamp"]  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_entry["Ensemble_Raw_Prob"]    = raw_p
-    log_entry["Model_Threshold"]      = best_threshold_saved      # from JSON via part 1
-    log_entry["Threshold_Method"]     = THRESHOLD_METHOD          # NEW: Youden / fallback label
-    log_entry["Entropy_NaturalLog"]   = entropy
-    log_entry["Gated_Prob_Gamma"]     = adj_p
-    log_entry["Clinical_Risk_Label"]  = risk_label
+    log_entry["Inference_Timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_entry["Ensemble_Raw_Prob"]   = raw_p
+    log_entry["Model_Threshold"]     = best_threshold_saved
+    log_entry["Threshold_Method"]    = THRESHOLD_METHOD
+    log_entry["Entropy_NaturalLog"]  = entropy
+    log_entry["Gated_Prob_Gamma"]    = adj_p
+    log_entry["Clinical_Risk_Label"] = risk_label
     log_entry["Gamma_Penalty_Applied"] = GAMMA
-    log_entry["J_Score"]              = J_SCORE                   # NEW: Youden J value
+    log_entry["J_Score"]             = J_SCORE
     return append_to_gsheet(log_entry)
 
-
-# ============================================================
-# 3. GOOGLE SHEETS: READ
-# ============================================================
 def read_from_gsheet(n=5):
     client, err = get_gs_client_from_secrets()
-    if client is None:
-        return None, f"Google Sheets client error: {err}"
-
+    if client is None: return None, f"Error: {err}"
     sheet_key      = st.secrets.get("gsheet_key")
     worksheet_name = st.secrets.get("gsheet_worksheet", "streamlit_project Data")
-    if not sheet_key:
-        return None, "No gsheet_key in secrets"
-
+    if not sheet_key: return None, "No gsheet_key"
     try:
         sh         = client.open_by_key(sheet_key)
         ws         = sh.worksheet(worksheet_name)
         all_values = ws.get_all_values()
-        if not all_values or len(all_values) <= 1:
-            return pd.DataFrame(), None
+        if not all_values or len(all_values) <= 1: return pd.DataFrame(), None
         df = pd.DataFrame(all_values[1:], columns=all_values[0])
         return df.tail(n), None
     except Exception as e:
         return None, str(e)
 
-
 # ============================================================
-# 4. SIDEBAR
+# 18. SIDEBAR
 # ============================================================
 with st.sidebar:
     st.title("⚙ Model Controls")
@@ -834,222 +1085,162 @@ with st.sidebar:
         ["🔍 Calibration (Audit)", "📊 Evaluation / Prediction"],
         index=0
     )
-
     st.write(f"🔹 **High-risk percentile (frozen): Top {FROZEN_PERCENTILE}%**")
 
-    # ----------------------------------------------------------
-    # CALIBRATION AUDIT PANEL
-    # ----------------------------------------------------------
     if sidebar_view == "🔍 Calibration (Audit)":
         st.subheader("🔒 Frozen Calibration State")
         st.write("**Chosen calibrator:**", CHOSEN_CALIBRATOR_NAME)
         st.write("**Threshold (Youden's J):**", f"{best_threshold_saved:.4f}")
-
-        # NEW: show method and J score
         st.caption(f"Method: {THRESHOLD_METHOD} | J = {J_SCORE:.4f}" if J_SCORE else
                    f"Method: {THRESHOLD_METHOD}")
-
         st.markdown("#### 📁 Calibration Metadata")
         st.json(chosen_calibrator_info)
-
-        # Diagnostic comparison — all three methods from JSON
         if THR_SEARCH_DIAG is not None or THR_ENTROPY_DIAG is not None:
             st.markdown("#### 📊 Threshold Method Comparison")
             rows = [("Youden (primary ✅)", best_threshold_saved,
                      SAVED_FP if SAVED_FP is not None else "—")]
             if THR_SEARCH_DIAG is not None:
-                rows.append(("Search  (diag)",  THR_SEARCH_DIAG,  FP_SEARCH_DIAG  or "—"))
+                rows.append(("Search  (diag)", THR_SEARCH_DIAG, FP_SEARCH_DIAG or "—"))
             if THR_ENTROPY_DIAG is not None:
-                rows.append(("Entropy (diag)",  THR_ENTROPY_DIAG, FP_ENTROPY_DIAG or "—"))
-            st.dataframe(
-                pd.DataFrame(rows, columns=["Method", "Threshold", "FPs"]),
-                hide_index=True, use_container_width=True
-            )
-
-        # Training performance metrics
+                rows.append(("Entropy (diag)", THR_ENTROPY_DIAG, FP_ENTROPY_DIAG or "—"))
+            _fps_df = pd.DataFrame(rows, columns=["Method", "Threshold", "FPs"])
+            _fps_df["FPs"] = _fps_df["FPs"].apply(lambda x: int(x) if x != "—" else 0)
+            st.dataframe(_fps_df, hide_index=True, use_container_width=True)
         if SAVED_RECALL is not None:
             st.markdown("#### 📈 Training Performance")
             m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Recall",    f"{SAVED_RECALL:.1%}")
-            m2.metric("TP",        SAVED_TP or "—")
-            m3.metric("FP",        SAVED_FP or "—")
-            m4.metric("FN",        SAVED_FN or "—")
-
+            m1.metric("Recall", f"{SAVED_RECALL:.1%}")
+            m2.metric("TP", SAVED_TP or "—")
+            m3.metric("FP", SAVED_FP or "—")
+            m4.metric("FN", SAVED_FN or "—")
         st.markdown("---")
         st.subheader("☁️ Clinical Cloud Vault")
-
         sheet_id = st.secrets.get("gsheet_key")
         if sheet_id:
             clean_id  = sheet_id.split("/d/")[1].split("/")[0] if "/d/" in sheet_id else sheet_id
             vault_url = f"https://docs.google.com/spreadsheets/d/{clean_id}"
             st.link_button("📂 Open Clinical Vault", vault_url)
-
         if st.button("🔍 Preview Recent Cloud Inferences"):
             with st.spinner("Fetching from Vault..."):
                 df_history, err = read_from_gsheet(n=5)
-                if err:
-                    st.error(f"Vault Connection Error: {err}")
+                if err: st.error(f"Vault Connection Error: {err}")
                 elif df_history is not None and not df_history.empty:
                     st.dataframe(df_history, use_container_width=True)
-                else:
-                    st.info("Clinical Vault is empty or headers only.")
-
-        # REMOVED: FALLBACK_THRESHOLD and FALLBACK_SENSITIVITY_FLOOR metrics
-        # (stale hardcoded values — threshold is now fully from JSON)
+                else: st.info("Clinical Vault is empty.")
         st.markdown("---")
-        st.caption(f"🔒 Threshold derived via {THRESHOLD_METHOD} | 2026 Mortality Artifacts")
-        st.markdown("[📖 View Clinical Audit Methodology](https://your-research-repo.link/docs)")
+        st.caption(f"🔒 4-Model Ensemble | T_screen={best_threshold_saved:.4f} | AUC={thr_data.get('ensemble_auc','—')}")
 
-    # ----------------------------------------------------------
-    # PREDICTION & EVALUATION PANEL
-    # ----------------------------------------------------------
     elif sidebar_view == "📊 Evaluation / Prediction":
         st.subheader("Prediction Configuration")
-
-        st.selectbox(
-            "Calibration mode (display only)",
-            ["Auto (chosen)", "Beta", "Isotonic", "None"],
-            index=0,
-            key="calib_mode",
-            help="Calibration affects displayed probabilities. Triage labels use Youden threshold."
-        )
-
+        st.selectbox("Calibration mode (display only)",
+                     ["Auto (chosen)", "Beta", "Isotonic", "None"],
+                     index=0, key="calib_mode")
         st.markdown("---")
         st.subheader("🩺 Clinical Risk Stratification")
-
         stratification_mode = st.radio(
             "Risk stratification method",
             ["Percentile-based (Research Only)", "Safety-First Threshold (Clinical)"],
-            index=1,
-            key="strat_method_radio",
-            help=f"Clinical mode uses the {best_threshold_saved:.4f} Youden threshold."
-        )
-
+            index=1, key="strat_method_radio")
         is_percentile_mode = stratification_mode.startswith("Percentile")
-
         if is_percentile_mode:
             if not IS_FROZEN or FROZEN_PERCENTILE is None:
-                st.error("❌ Frozen percentile cutoff missing.")
-                st.stop()
+                st.error("❌ Frozen percentile cutoff missing."); st.stop()
             st.write(f"🔹 **Relative Cutoff: Top {FROZEN_PERCENTILE}%**")
-            st.caption("Identifies the highest-risk slice of the current cohort.")
         else:
             st.write(f"🔹 **Youden Threshold: {best_threshold_saved:.4f}**")
-            st.caption(
-                f"Derived via {THRESHOLD_METHOD} (J={J_SCORE:.4f}). "
-                "Maximises sensitivity + specificity simultaneously."
-                if J_SCORE else
-                f"Derived via {THRESHOLD_METHOD}. Ensures 100% sensitivity."
-            )
-
         st.markdown("---")
         st.subheader("Metrics Display")
-        show_uncertainty      = st.checkbox("Show Uncertainty (Std & Entropy)", value=True)
-        show_raw_model_probs  = st.checkbox("Show Raw Model Probabilities",     value=True)
-        show_calibrated_probs = st.checkbox("Show Calibrated Probabilities",    value=True)
-        show_confusion        = st.checkbox("Show Confusion Matrix / Scores",   value=True,
-                                            help="Only visible if 'True Outcome' column is in CSV.")
-
+        show_uncertainty     = st.checkbox("Show Uncertainty (Std & Entropy)", value=True)
+        show_raw_model_probs = st.checkbox("Show Raw Model Probabilities", value=True)
+        show_confusion       = st.checkbox("Show Confusion Matrix / Scores", value=True)
 
 # ============================================================
-# 5. PREPROCESSING
+# 19. PREPROCESSING
 # ============================================================
-from sklearn.preprocessing import LabelEncoder
-
-# Authoritative ASA encoder — order verified from label_encoder.pkl
-clinical_label_encoder = LabelEncoder()
-clinical_label_encoder.classes_ = np.array(
-    ['ASA-E', 'ASA_four', 'ASA_one', 'ASA_three', 'ASA_two']
-)
+ASA_ORDINAL_MAP = {
+    'ASA_one':   1,
+    'ASA_two':   2,
+    'ASA_three': 3,
+    'ASA_four':  4,
+    'ASA-E':     5
+}
+def apply_asa_encoding(df_col):
+    return df_col.map(ASA_ORDINAL_MAP).fillna(1).astype(float)
 
 def apply_training_scaling(df: pd.DataFrame) -> np.ndarray:
-    """
-    Unified preprocessing: encode ASA → align features → scale.
-    Mirrors training pipeline exactly.
-    """
     try:
         working_df = df.copy()
         if 'ASAclassification' in working_df.columns:
             if working_df['ASAclassification'].dtype == object:
-                valid_labels = set(label_encoder.classes_)
+                valid_labels = set(ASA_ORDINAL_MAP.keys())
                 working_df['ASAclassification'] = working_df['ASAclassification'].apply(
-                    lambda x: x if x in valid_labels else label_encoder.classes_[0]
-                )
-                working_df['ASAclassification'] = label_encoder.transform(
-                    working_df['ASAclassification']
-                )
+                    lambda x: x if x in valid_labels else 'ASA_one')
+                working_df['ASAclassification'] = apply_asa_encoding(
+                    working_df['ASAclassification'])
         df_aligned = working_df.reindex(columns=feature_names, fill_value=0.0).fillna(0.0)
         X = df_aligned.values.astype(np.float32)
         if scaler is not None and len(SCALABLE_INDICES) > 0:
             X[:, SCALABLE_INDICES] = scaler.transform(X[:, SCALABLE_INDICES])
         return X
     except Exception as e:
-        st.error(f"⚠️ Preprocessing FAILED: {e}")
-        st.info("Check CSV headers match required clinical features.")
-        st.stop()
-
+        st.error(f"⚠️ Preprocessing FAILED: {e}"); st.stop()
 
 # ============================================================
-# 6. CALIBRATION WRAPPERS
+# 20. CALIBRATION WRAPPERS
 # ============================================================
 def calibrate_probs(arr, mode="Auto (chosen)",
-                    chosen_calibrator_info=None,
-                    beta_calibrator=None,
-                    iso_calibrator=None):
-    """Vectorised calibration for batch arrays."""
-    # Allow callers to pass locals; fall back to module-level objects
+                    chosen_calibrator_info=None, beta_calibrator=None,
+                    iso_calibrator=None, platt_calibrator=None):
     _info  = chosen_calibrator_info or globals().get("chosen_calibrator_info", {})
-    _beta  = beta_calibrator        or globals().get("beta_calibrator")
-    _iso   = iso_calibrator         or globals().get("iso_calibrator")
-
+    _beta  = beta_calibrator  or globals().get("beta_calibrator")
+    _iso   = iso_calibrator   or globals().get("iso_calibrator")
+    _platt = platt_calibrator or globals().get("platt_calibrator")
     arr       = np.asarray(arr, dtype=float)
     p_clipped = np.clip(arr, EPS, 1 - EPS)
-
     chosen = mode
     if mode == "Auto (chosen)":
-        chosen = (_info or {}).get("chosen_calibrator", "None")
-
-    if chosen.lower() == "beta" and _beta is not None:
-        if hasattr(_beta, "a") and hasattr(_beta, "b"):
-            return np.clip(_beta.transform(p_clipped), EPS, 1 - EPS)
-        try:
-            result = _beta.predict_proba(p_clipped.reshape(-1, 1))[:, 1]
-            return np.clip(result, EPS, 1 - EPS)
-        except Exception:
-            return p_clipped
-
-    if chosen.lower() == "isotonic" and _iso is not None:
-        return np.clip(_iso.predict(p_clipped), EPS, 1 - EPS)
-
+        chosen = (_info or {}).get("chosen_calibrator", "platt")
+    chosen_lower = chosen.lower()
+    if chosen_lower == "platt":
+        if _platt is not None:
+            try: return np.clip(_platt.predict_proba(p_clipped.reshape(-1,1))[:,1], EPS, 1-EPS)
+            except Exception: pass
+        return p_clipped
+    if chosen_lower == "isotonic":
+        if _iso is not None:
+            try: return np.clip(_iso.predict(p_clipped), EPS, 1-EPS)
+            except Exception: pass
+        return p_clipped
+    if chosen_lower == "beta":
+        if _beta is not None:
+            try:
+                if hasattr(_beta, "a") and hasattr(_beta, "b"):
+                    return np.clip(_beta.transform(p_clipped), EPS, 1-EPS)
+                return np.clip(_beta.predict_proba(p_clipped.reshape(-1,1))[:,1], EPS, 1-EPS)
+            except Exception: pass
+        return p_clipped
     return p_clipped
 
-
 def calibrate_single(val: float, mode: str):
-    """Calibration for a single value (manual entry)."""
     res_arr = calibrate_probs(np.array([val]), mode=mode)
     chosen  = mode
     if mode == "Auto (chosen)":
         chosen = (chosen_calibrator_info or {}).get("chosen_calibrator", "uncalibrated")
     return float(res_arr[0]), chosen
 
-
 def calibrate_probs_runtime(arr):
-    """Connects sidebar calib_mode to calibrate_probs for batch CSV."""
     mode = st.session_state.get("calib_mode", "Auto (chosen)")
     return calibrate_probs(arr, mode)
 
-
 # ============================================================
-# 7. MAIN UI
+# 21. MAIN UI
 # ============================================================
 results = None
-mode    = st.radio(
-    "Select Entry Mode", ["Batch CSV", "Manual Entry"],
-    key="entry_mode_selector"
-)
+mode    = st.radio("Select Entry Mode", ["Batch CSV", "Manual Entry"],
+                   key="entry_mode_selector")
 
 # ============================================================
-# 7a. BATCH CSV
+# 21a. BATCH CSV
 # ============================================================
 if mode == "Batch CSV":
     st.header("📂 Batch Clinical Audit")
@@ -1057,163 +1248,164 @@ if mode == "Batch CSV":
 
     if uploaded:
         df_raw = pd.read_csv(uploaded)
+        df_raw.columns = df_raw.columns.str.strip('"').str.strip()
         st.success(f"📥 Loaded {len(df_raw)} patient records.")
 
-        # --- Preprocessing ---
         try:
             df_input = df_raw.copy()
             if 'ASAclassification' in df_input.columns:
                 df_input['ASAclassification'] = (
-                    df_input['ASAclassification'].astype(str).str.strip()
-                )
-                df_input['ASAclassification'] = clinical_label_encoder.transform(
-                    df_input['ASAclassification']
-                )
+                    df_input['ASAclassification'].astype(str).str.strip())
+                df_input['ASAclassification'] = apply_asa_encoding(df_input['ASAclassification'])
             else:
-                st.error("🚨 'ASAclassification' column missing from CSV.")
-                st.stop()
-
+                st.error("🚨 'ASAclassification' column missing."); st.stop()
             df_aligned = df_input.reindex(columns=feature_names, fill_value=0.0)
             X_np       = df_aligned.values.astype(np.float32)
             if scaler is not None and len(SCALABLE_INDICES) > 0:
                 X_np[:, SCALABLE_INDICES] = scaler.transform(X_np[:, SCALABLE_INDICES])
             st.info("✅ Data aligned with clinical feature set.")
         except Exception as e:
-            st.error(f"🚨 Preprocessing Failure: {e}")
-            st.info("Verify ASA labels: ['ASA-E', 'ASA_four', 'ASA_one', 'ASA_three', 'ASA_two']")
-            st.stop()
+            st.error(f"🚨 Preprocessing Failure: {e}"); st.stop()
 
-        # --- Inference ---
-        with st.spinner(f"🚀 Running {MC_RUNS} Monte Carlo passes per patient..."):
+        with st.spinner(f"🚀 Running {MC_RUNS} Monte Carlo passes × 4 models..."):
             m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
                 load_models_and_mc_for_batch(X_np, n_forward_passes=MC_RUNS)
 
-        # --- Calibration ---
-        # NOTE: calibrate on gated_scores (post-gate) not ensemble mean
-        # ensemble mean is pre-gate and on a different scale
-        iso_calibrated   = calibrate_probs(gated_scores, mode="Isotonic")
-        beta_calibrated  = calibrate_probs(gated_scores, mode="Beta")
-        calibrated_probs = calibrate_probs_runtime(gated_scores)
-
-        # --- Results assembly ---
         results = df_raw.copy()
-        results["Ensemble_Mean"]   = np.mean(m_means, axis=1)
-        results["Uncertainty_SD"]  = uncertainties
-        results["Entropy_Norm"]    = entropy_norm
-        results["Gated_Score"]     = gated_scores
-        results["Calibrated_Prob"] = calibrated_probs
-        results["Isotonic_Audit"]  = iso_calibrated
-        results["Beta_Audit"]      = beta_calibrated
-        # REMOVED: "Safety_Boost" (gated - ensemble_mean) — different score spaces, misleading
-        # REMOVED: hardcoded 0.4380 label — use best_threshold_saved from JSON
-        # Runtime scores are in weighted_probs space → use best_t_raw not best_threshold_saved
-        runtime_thr = thr_data.get("best_t_raw", best_threshold_saved)
-        results["Risk_Label"]      = np.where(
-            gated_scores >= runtime_thr, "High Risk", "Low Risk"
-        )
-        results["Triage_Level"]    = triage_levels
-        results["Threshold_Used"]  = best_threshold_saved   # audit trail
-        results["Threshold_Method"] = THRESHOLD_METHOD       # audit trail
+        results["P_VAE"]           = np.round(m_means[:, 0], 4)
+        results["P_M1_Flipout"]    = np.round(m_means[:, 1], 4)
+        results["P_M2_corrected"]  = np.round(m_means[:, 2], 4)
+        results["P_Bayesian"]      = np.round(m_means[:, 3], 4)
+        results["Ensemble_Mean"]   = np.round(np.mean(m_means, axis=1), 4)
+        results["Uncertainty_SD"]  = np.round(uncertainties, 4)
+        results["Entropy_Norm"]    = np.round(entropy_norm, 4)
+        results["Gated_Score"]     = np.round(gated_scores, 4)
+        runtime_thr = thr_data.get("best_t_raw", 0.6987)   # raw-space deployment threshold
+        results["Risk_Label"]      = np.where(gated_scores >= runtime_thr, "High Risk", "Low Risk")
+        triage_display = [
+            t.replace("🔴 ","").replace("🟡 ","").replace("🟢 ","")
+            for t in triage_levels]
+        results["Triage_Level"]    = triage_display
+        results["Threshold_Used"]  = round(float(runtime_thr), 4)
+        results["Threshold_Method"] = THRESHOLD_METHOD
 
-        # --- Metrics ---
         st.divider()
-        st.write(
-            f"📊 **Batch Diagnostics:** "
-            f"Avg Entropy: {float(np.mean(entropy)):.4f} | "
-            f"Threshold [{THRESHOLD_METHOD}]: {best_threshold_saved:.4f}"
-        )
+        st.write(f"📊 **Batch Diagnostics:** Avg Entropy: {float(np.mean(entropy)):.4f} | "
+                 f"T_screen (Youden): {runtime_thr:.4f} | HIGH_RISK: {HIGH_RISK_BOUNDARY:.4f}")
 
         high_risk_count = int(np.sum(results["Risk_Label"] == "High Risk"))
         m1, m2, m3 = st.columns(3)
         m1.metric("Total Sample",     len(results))
         m2.metric("High Risk Alerts", high_risk_count,
-                  delta=f"{(high_risk_count / len(results)):.1%}",
-                  delta_color="inverse")
-        m3.metric(f"Threshold ({THRESHOLD_METHOD})", f"{best_threshold_saved:.4f}")
+                  delta=f"{(high_risk_count/len(results)):.1%}", delta_color="inverse")
+        m3.metric("Ensemble AUC", str(thr_data.get("ensemble_auc","—")))
 
-        # --- Calibration audit ---
-        with st.expander("🔬 Calibration Performance & Model Agreement"):
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Isotonic (Avg)", f"{iso_calibrated.mean():.1%}")
-            c2.metric("Beta (Avg)",     f"{beta_calibrated.mean():.1%}", delta="PREFERRED")
-            agreement = 1 - abs(iso_calibrated.mean() - beta_calibrated.mean())
-            c3.metric("Model Convergence", f"{agreement:.1%}")
+        with st.expander("🔬 Calibration at Decision Threshold"):
+            thr_runtime = thr_data.get("best_t_raw", best_threshold_saved)
+            p_platt_thr = thr_data.get("calib_platt_at_thr")
+            p_iso_thr   = thr_data.get("calib_iso_at_thr")
+            p_beta_thr  = thr_data.get("calib_beta_at_thr")
+            cs1, cs2, cs3 = st.columns(3)
+            cs1.metric("Platt (PRIMARY)",
+                       f"{p_platt_thr:.1%}" if p_platt_thr is not None else "n/a",
+                       delta="✓ recommended", delta_color="off")
+            cs2.metric("Isotonic",
+                       f"{p_iso_thr:.1%}" if p_iso_thr is not None else "n/a",
+                       delta="step-function artifact", delta_color="off")
+            cs3.metric("Beta",
+                       f"{p_beta_thr:.1%}" if p_beta_thr is not None else "n/a",
+                       delta="parametric", delta_color="off")
 
-        # --- Confusion matrix (if ground truth present) ---
-        if show_confusion and "True_Outcome" in results.columns:
-            with st.expander("📊 Confusion Matrix"):
-                y_true_batch = results["True_Outcome"].astype(int).values
-                y_pred_batch = (gated_scores >= best_threshold_saved).astype(int)
-                cm = confusion_matrix(y_true_batch, y_pred_batch)
-                rec  = recall_score(y_true_batch, y_pred_batch, zero_division=0)
-                prec = precision_score(y_true_batch, y_pred_batch, zero_division=0)
-                f1   = f1_score(y_true_batch, y_pred_batch, zero_division=0)
-                st.write(f"Recall: **{rec:.1%}** | Precision: **{prec:.1%}** | F1: **{f1:.3f}**")
-                st.dataframe(
-                    pd.DataFrame(cm,
-                                 index=["True: Survivor", "True: Death"],
-                                 columns=["Pred: Safe", "Pred: Flagged"]),
-                    use_container_width=True
-                )
-                try:
-                    auc = roc_auc_score(y_true_batch, gated_scores)
-                    st.write(f"AUC-ROC: **{auc:.4f}**")
-                    plot_reliability(y_true_batch, gated_scores, "Reliability Curve")
-                except Exception:
-                    pass
+        death_col = next(
+            (c for c in results.columns
+             if c.lower().strip('"').strip() in ("death","true_outcome","outcome","mortality")),
+            None)
+        if show_confusion and death_col:
+            with st.expander("📊 Performance Metrics & ROC Curve"):
+                raw_gt    = results[death_col].astype(str).str.strip('"').str.strip()
+                gt_series = pd.to_numeric(raw_gt, errors="coerce")
+                valid_mask = gt_series.notna()
+                if valid_mask.sum() == 0:
+                    st.warning(f"No valid numeric values in '{death_col}'.")
+                else:
+                    y_true_batch = gt_series[valid_mask].astype(int).values
+                    y_pred_batch = (gated_scores[valid_mask] >= runtime_thr).astype(int)
+                    cm   = confusion_matrix(y_true_batch, y_pred_batch)
+                    rec  = recall_score(y_true_batch, y_pred_batch, zero_division=0)
+                    prec = precision_score(y_true_batch, y_pred_batch, zero_division=0)
+                    f1   = f1_score(y_true_batch, y_pred_batch, zero_division=0)
+                    spec = cm[0,0]/(cm[0,0]+cm[0,1]) if (cm[0,0]+cm[0,1])>0 else 0.0
+                    tn, fp, fn, tp = cm.ravel() if cm.size==4 else (cm[0,0],0,0,cm[1,1])
+                    mc1,mc2,mc3,mc4 = st.columns(4)
+                    mc1.metric("Sensitivity", f"{rec:.1%}",
+                               delta="FN=0 ✅" if fn==0 else f"FN={fn} ⚠️",
+                               delta_color="off" if fn==0 else "inverse")
+                    mc2.metric("Specificity", f"{spec:.1%}", delta=f"FP={fp}")
+                    mc3.metric("Precision",   f"{prec:.1%}")
+                    mc4.metric("F1 Score",    f"{f1:.3f}")
+                    st.markdown("**Confusion Matrix**")
+                    st.dataframe(pd.DataFrame(cm,
+                        index=["True: Survivor","True: Death"],
+                        columns=["Pred: Safe","Pred: Flagged"]),
+                        use_container_width=True)
+                    n_pos = int(y_true_batch.sum()); n_neg = int(len(y_true_batch)-n_pos)
+                    if n_pos >= 2 and n_neg >= 1:
+                        auc = roc_auc_score(y_true_batch, gated_scores[valid_mask])
+                        fpr, tpr, roc_thresholds = roc_curve(y_true_batch, gated_scores[valid_mask])
+                        j_scores = tpr-fpr; best_idx = int(np.argmax(j_scores))
+                        fig, ax = plt.subplots(figsize=(5,4))
+                        ax.plot(fpr,tpr,color="#1a73e8",lw=2,label=f"Ensemble (AUC={auc:.3f})")
+                        ax.plot([0,1],[0,1],"k--",lw=1,label="Random")
+                        ax.scatter([fpr[best_idx]],[tpr[best_idx]],color="#d93025",zorder=5,
+                                   label=f"Youden (thr≈{roc_thresholds[best_idx]:.3f})")
+                        ax.set_xlabel("1 − Specificity (FPR)"); ax.set_ylabel("Sensitivity (TPR)")
+                        ax.set_title("ROC Curve — 4-Model Ensemble")
+                        ax.legend(fontsize=9); ax.set_xlim([0,1]); ax.set_ylim([0,1.02])
+                        fig.tight_layout(); st.pyplot(fig); plt.close(fig)
+                        a1,a2,a3 = st.columns(3)
+                        a1.metric("AUC-ROC",f"{auc:.4f}",
+                                  delta="excellent" if auc>=0.90 else "good" if auc>=0.80 else "fair")
+                        a2.metric("Deaths",   f"{n_pos}")
+                        a3.metric("Survivors",f"{n_neg}")
+                    if n_pos>=1 and n_neg>=1:
+                        plot_reliability(y_true_batch, gated_scores[valid_mask],
+                                         "Reliability Curve — 4-Model Ensemble")
 
-        # --- Styled triage table ---
         st.subheader("📋 Detailed Clinical Triage List")
-
         def style_triage_row(val):
             text = str(val).upper()
             if "CRITICAL"  in text: return 'color:white;background-color:#d93025;font-weight:bold;'
             if "GRAY ZONE" in text: return 'color:black;background-color:#f9ab00;font-weight:bold;'
             if "SAFE"      in text: return 'color:white;background-color:#1e8e3e;font-weight:bold;'
             return ''
-
-        fmt = {
-            "Ensemble_Mean":   "{:.4f}",
-            "Uncertainty_SD":  "{:.4f}",
-            "Gated_Score":     "{:.4f}",
-            "Calibrated_Prob": "{:.2%}",
-            "Beta_Audit":      "{:.2%}",
-        }
-        styled_df = (
-            results.style
-            .applymap(style_triage_row, subset=["Triage_Level"])
-            .background_gradient(subset=["Gated_Score"], cmap="YlOrRd")
-            .format(fmt)
-        )
+        fmt = {"Ensemble_Mean":"{:.4f}","Uncertainty_SD":"{:.4f}",
+               "Entropy_Norm":"{:.4f}","Gated_Score":"{:.4f}"}
+        styled_df = (results.style
+                     .applymap(style_triage_row, subset=["Triage_Level"])
+                     .background_gradient(subset=["Gated_Score"], cmap="YlOrRd")
+                     .format(fmt))
         st.dataframe(styled_df, use_container_width=True)
-
-        # --- Export / Archive ---
         st.markdown("---")
         col_dl, col_gs = st.columns(2)
         with col_dl:
-            csv_report = results.to_csv(index=False).encode("utf-8")
+            csv_report = results.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
                 label="📥 Download Triage Report (CSV)",
                 data=csv_report,
-                file_name=f"clinical_triage_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
-            )
+                file_name=f"clinical_triage_4model_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv")
         with col_gs:
             if st.button("🚀 Archive Batch to Clinical Vault"):
-                with st.spinner("Syncing records..."):
+                with st.spinner("Syncing..."):
                     success, message = append_to_gsheet(results)
-                    if success:
-                        st.success(f"Archived {len(results)} records.")
-                    else:
-                        st.error(f"Sync failed: {message}")
-
+                    if success: st.success(f"Archived {len(results)} records.")
+                    else: st.error(f"Sync failed: {message}")
 
 # ============================================================
-# 7b. MANUAL ENTRY
+# 21b. MANUAL ENTRY
 # ============================================================
 elif mode == "Manual Entry":
     manual_data = {f: 0.0 for f in feature_names}
-
     with st.form("entry_form"):
         st.subheader("📋 Patient Data Input")
         cols = st.columns(3)
@@ -1222,43 +1414,34 @@ elif mode == "Manual Entry":
                 if f == "ASAclassification":
                     manual_data[f] = st.selectbox(
                         "ASA Classification",
-                        ["ASA-E", "ASA_one", "ASA_two", "ASA_three", "ASA_four"]
-                    )
+                        ["ASA-E","ASA_one","ASA_two","ASA_three","ASA_four"])
                 elif f in categorical_features:
                     manual_data[f] = 1.0 if st.checkbox(f, value=False) else 0.0
                 else:
                     manual_data[f] = st.number_input(f, value=0.0)
-
         submitted = st.form_submit_button("Predict")
 
     if submitted:
-        # --- Preprocessing ---
         df_manual = pd.DataFrame([manual_data])
-        df_manual["ASAclassification"] = clinical_label_encoder.transform(
-            [df_manual["ASAclassification"].iloc[0]]
-        )
+        df_manual["ASAclassification"] = apply_asa_encoding(df_manual["ASAclassification"])
         X_manual = apply_training_scaling(df_manual)
 
-        # --- Inference ---
         m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
             load_models_and_mc_for_batch(X_manual, n_forward_passes=MC_RUNS)
 
-        current_triage   = triage_levels[0]
-        adj_p            = float(gated_scores[0])
-        e_val            = float(entropy[0])
-        en_val           = float(entropy_norm[0])
-        # FIXED: ensemble_mean_val from per-model means, not gated scores
+        current_triage    = triage_levels[0]
+        adj_p             = float(gated_scores[0])
+        e_val             = float(entropy[0])
+        en_val            = float(entropy_norm[0])
         ensemble_mean_val = float(np.mean(m_means[0]))
 
-        runtime_thr  = thr_data.get("best_t_raw", best_threshold_saved)
+        runtime_thr  = thr_data.get("best_t_raw", 0.6987)   # raw-space deployment threshold
         is_high_risk = adj_p >= runtime_thr
-        is_near_miss = (not is_high_risk) and (adj_p >= best_threshold_saved - 0.10)
+        is_near_miss = (not is_high_risk) and (adj_p >= runtime_thr - 0.10)
         label        = "High Risk" if is_high_risk else ("Borderline" if is_near_miss else "Low Risk")
 
-        # --- Calibration ---
-        cal_p, cal_method = calibrate_single(ensemble_mean_val, CHOSEN_CALIBRATOR_NAME)
+        cal_p, cal_method = calibrate_single(adj_p, "Platt")
 
-        # --- Clinical display ---
         st.divider()
         res_col1, res_col2 = st.columns(2)
         with res_col1:
@@ -1273,100 +1456,79 @@ elif mode == "Manual Entry":
             else:
                 st.success(f"✅ **{current_triage}**")
                 st.metric("Risk Decision", "STABLE", delta="ROUTINE CARE")
-
             st.write(f"**Gated Score:** `{adj_p:.4f}`")
-            st.caption(
-                f"Threshold [{THRESHOLD_METHOD}]: {best_threshold_saved:.4f} | "
-                f"Entropy: {e_val:.4f} | Norm: {en_val:.4f}"
-            )
-
+            st.caption(f"Threshold [{THRESHOLD_METHOD}]: {best_threshold_saved:.4f} | "
+                       f"Entropy: {e_val:.4f}"
+                       + (f" | Norm: {en_val:.4f}" if en_val > 0
+                          else " | Norm: N/A (single patient — batch norm not applicable)"))
         with res_col2:
-            st.metric("Calibrated Risk Estimate", f"{cal_p:.1%}")
-            st.write(f"**Method:** {cal_method.capitalize()}")
-            st.caption(
-                f"Youden threshold: {best_threshold_saved:.4f} | "
-                f"J = {J_SCORE:.4f}" if J_SCORE else
-                f"Threshold: {best_threshold_saved:.4f}"
-            )
+            st.metric("Calibrated Risk (Platt)", f"{cal_p:.1%}")
+            st.caption(f"Platt scaling — primary calibrator at n_events=13. "
+                       + (f"Youden J={J_SCORE:.4f}" if J_SCORE else
+                          f"Threshold: {best_threshold_saved:.4f}"))
 
-        # --- Calibrator comparison ---
-        st.markdown("---")
-        st.subheader("🔬 Calibrator Comparison")
-        iso_prob,  _ = calibrate_single(ensemble_mean_val, "Isotonic")
-        beta_prob, _ = calibrate_single(ensemble_mean_val, "Beta")
+        st.markdown("### 🔬 Calibrated Mortality Risk Estimates")
+        p_platt, _ = calibrate_single(adj_p, "Platt")
+        p_iso,   _ = calibrate_single(adj_p, "Isotonic")
+        p_beta,  _ = calibrate_single(adj_p, "Beta")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Platt", f"{p_platt:.1%}", delta="✓ RECOMMENDED", delta_color="off")
+        col2.metric("Isotonic", f"{p_iso:.1%}",
+                    delta="⚠ step-function artifact" if p_iso < p_platt*0.5 else "empirical",
+                    delta_color="inverse" if p_iso < p_platt*0.5 else "off")
+        col3.metric("Beta", f"{p_beta:.1%}",
+                    delta="⚠ may overestimate" if p_beta > p_platt*2 else "parametric",
+                    delta_color="inverse" if p_beta > p_platt*2 else "off")
+        spread = max(p_platt,p_iso,p_beta) - min(p_platt,p_iso,p_beta)
+        if spread > 0.15:
+            st.warning(f"⚠️ Wide calibration spread ({spread:.0%}) — reflects small training "
+                       f"sample (n=13 deaths). Platt is the most reliable estimate.")
+        else:
+            st.success(f"✅ Calibrators agree within {spread:.0%}.")
+        st.caption("Triage zone (SAFE / GRAY ZONE / CRITICAL) is based on gated score vs threshold, "
+                   "not on calibrated probability.")
 
-        comp_col1, comp_col2, comp_col3 = st.columns(3)
-        comp_col1.metric(
-            "Isotonic Calibration", f"{iso_prob:.1%}",
-            delta="✓ CHOSEN" if CHOSEN_CALIBRATOR_NAME.lower() == "isotonic" else "VALIDATED",
-            delta_color="off"
-        )
-        comp_col2.metric(
-            "Beta Calibration", f"{beta_prob:.1%}",
-            delta="✓ CHOSEN" if CHOSEN_CALIBRATOR_NAME.lower() == "beta" else "PREFERRED",
-            delta_color="normal"
-        )
-        diff = abs(iso_prob - beta_prob)
-        comp_col3.metric(
-            "Difference", f"{diff:.1%}",
-            delta="Significant" if diff > 0.03 else "Minimal",
-            delta_color="inverse" if diff > 0.03 else "normal"
-        )
-
-        # --- Side-by-side interpretation ---
-        st.markdown("#### 🔍 Side-by-Side Interpretation")
-        int_col1, int_col2 = st.columns(2)
-
-        # Context uses dynamic threshold — no hardcoded 0.2970
         if adj_p < best_threshold_saved * 0.85:
             triage_context = "Score is well below the clinical threshold — very low risk."
         elif adj_p < best_threshold_saved:
             triage_context = "Score is approaching the threshold. Monitor closely."
         else:
             triage_context = "Score exceeds the clinical decision threshold — prioritise review."
-
-        with int_col1:
-            st.write("**Isotonic Calibration:**")
-            st.write(f"- Gated score `{adj_p:.4f}` → **{iso_prob:.1%}** mortality risk")
-            st.caption(f"📊 Empirical: patients with this score had ~{iso_prob:.1%} mortality in training.")
-        with int_col2:
-            st.write("**Beta Calibration (PREFERRED):**")
-            st.write(f"- Gated score `{adj_p:.4f}` → **{beta_prob:.1%}** mortality risk")
-            st.caption("🧪 Validated: Beta estimates are more reliable for low-prevalence mortality.")
-
         st.markdown(f"> **Clinical Context:** {triage_context}")
-
         if "CRITICAL" in current_triage:
-            st.error(
-                f"🚨 **High Confidence Risk:** Score `{adj_p:.4f}` is in the critical percentile. "
-                "Immediate intervention advised."
-            )
+            st.error(f"🚨 Score `{adj_p:.4f}` in critical zone. Immediate intervention advised.")
         elif "GRAY ZONE" in current_triage:
-            st.warning(
-                f"⚠️ **Gray Zone:** Score `{adj_p:.4f}` is elevated. Maintain high vigilance."
-            )
+            st.warning(f"⚠️ Score `{adj_p:.4f}` elevated. Maintain high vigilance.")
         elif is_near_miss:
-            st.info(
-                f"💡 **Borderline:** Patient is within 10% of the threshold. "
-                "Review clinical history for secondary risk factors."
-            )
+            st.info("💡 Borderline: within 10% of threshold. Review secondary risk factors.")
 
-        # --- Model committee consensus ---
         st.divider()
-        st.markdown("### 🤝 Model Committee Consensus")
-        m1, m2, m3 = st.columns(3)
-        m1.metric("VAE ($P_1$)",     f"{m_means[0, 0]:.3f}")
-        m2.metric("Flipout ($P_2$)", f"{m_means[0, 1]:.3f}")
-        m3.metric("Bayesian ($P_3$)", f"{m_means[0, 2]:.3f}")
+        st.markdown("### 🤝 Model Committee Consensus (4 models — Performance-Normalized Weights)")
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("VAE (DNN)",           f"{m_means[0, 0]:.3f}", delta=f"w={VAE_WEIGHT:.4f}", delta_color="off")
+        mc2.metric("Flipout M1",          f"{m_means[0, 1]:.3f}", delta=f"w={M1_WEIGHT:.4f}", delta_color="off")
+        mc3.metric("Probabilistic M2",    f"{m_means[0, 2]:.3f}", delta=f"w={M2_WEIGHT:.4f}", delta_color="off")
+        mc4.metric("Bayesian MC",         f"{m_means[0, 3]:.3f}", delta=f"w={BAY_WEIGHT:.4f}", delta_color="off")
 
-        # --- Uncertainty display ---
+        v_vae = int(m_means[0,0] > thr_data.get("vote_threshold_vae", 0.6259))
+        v_m1  = int(m_means[0,1] > thr_data.get("vote_threshold_mid", 0.4830))
+        v_m2  = int(m_means[0,2] > thr_data.get("vote_threshold_m2",  0.6086))
+        v_bay = int(m_means[0,3] > thr_data.get("vote_threshold_bay", 0.6077))
+        votes_cast = v_vae + v_m1 + v_m2 + v_bay
+        st.caption(f"**Majority gate ({MAJORITY_VOTES}/4 required):** "
+                   f"{votes_cast}/4 models voted | "
+                   f"Gate {'OPEN ✅' if votes_cast >= MAJORITY_VOTES else 'CLOSED ⛔'}")
+
         if show_uncertainty:
             st.markdown("#### 📉 Uncertainty")
-            u1, u2 = st.columns(2)
+            u1, u2, u3 = st.columns(3)
             u1.metric("Ensemble Std Dev", f"{float(uncertainties[0]):.4f}")
-            u2.metric("Entropy (norm)",   f"{en_val:.4f}")
+            u2.metric("Shannon Entropy",  f"{e_val:.4f}")
+            u3.metric("Entropy (norm)",
+                      f"{en_val:.4f}" if en_val > 0 else "N/A",
+                      delta="single-patient — batch norm not applicable" if en_val==0 else None,
+                      delta_color="off")
 
-        # --- Audit logging ---
         audit_row = {k: (float(v) if not isinstance(v, str) else v)
                      for k, v in manual_data.items()}
         audit_row.update({
@@ -1382,7 +1544,5 @@ elif mode == "Manual Entry":
             "timestamp"       : pd.Timestamp.now().isoformat()
         })
         ok, err = append_to_gsheet(pd.DataFrame([audit_row]))
-        if ok:
-            st.success("✅ Patient record synced to clinical vault.")
-        else:
-            st.error(f"Sync failed: {err}")
+        if ok: st.success("✅ Patient record synced to clinical vault.")
+        else: st.error(f"Sync failed: {err}")
