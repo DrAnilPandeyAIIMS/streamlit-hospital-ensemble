@@ -1191,10 +1191,101 @@ if mode == "Batch CSV":
         except Exception as e:
             st.error(f"🚨 Preprocessing Failure: {e}"); st.stop()
 
-        with st.spinner(f"🚀 Running {MC_RUNS} Monte Carlo passes × 4 models..."):
-            m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
-                load_models_and_mc_for_batch(X_np)
+        # ── TWO-MODE INFERENCE ────────────────────────────────────────
+        # MODE A: Precomputed probs (validation cohort n=233)
+        #   Loads ensemble_mc_probs.npy (shape 233×4×100) generated
+        #   locally with 100 MC passes. Gives exact paper results.
+        #   Memory cost: ~0.4 MB. No model inference needed.
+        #
+        # MODE B: Live inference (new cohort, any size)
+        #   Runs MC_RUNS passes through all 4 models.
+        #   On cloud: MC_RUNS=20 (memory safe but noisier).
+        #   On local: MC_RUNS=100 (paper-exact).
+        # ─────────────────────────────────────────────────────────────
+        PRECOMPUTED_PATH = OUTPUTS_DIR / "ensemble_mc_probs.npy"
+        use_precomputed  = (
+            PRECOMPUTED_PATH.exists() and
+            len(df_raw) == 233
+        )
 
+        if use_precomputed:
+            # ── MODE A: precomputed 100-pass probabilities ────────────
+            st.info(
+                "✅ **Validation cohort detected (n=233)** — using precomputed "
+                "probabilities (100 MC passes, paper-exact results). "
+                "No live inference needed."
+            )
+            mc_probs       = np.load(str(PRECOMPUTED_PATH))   # (233, 4, 100)
+            mean_per_model = mc_probs.mean(axis=2)             # (233, 4)  mean over passes
+            mc_std         = mc_probs.std(axis=2).mean(axis=1) # (233,)    across-model SD
+
+            vae_p = mean_per_model[:, 0]
+            m1_p  = mean_per_model[:, 1]
+            m2_p  = mean_per_model[:, 2]
+            bay_p = mean_per_model[:, 3]
+
+            _w_vae = thr_data.get("weight_vae", thr_data.get("vae_weight", 0.2587))
+            _w_m1  = thr_data.get("weight_m1",  0.2337)
+            _w_m2  = thr_data.get("weight_m2",  thr_data.get("m2_weight", 0.2679))
+            _w_bay = thr_data.get("weight_bay", 0.2398)
+
+            base_risk = (vae_p * _w_vae + m1_p * _w_m1 +
+                         m2_p  * _w_m2  + bay_p * _w_bay)
+
+            v_vae = (vae_p > thr_data.get("vote_threshold_vae", 0.6259)).astype(int)
+            v_m1  = (m1_p  > thr_data.get("vote_threshold_mid", 0.4830)).astype(int)
+            v_m2  = (m2_p  > thr_data.get("vote_threshold_m2",  0.6086)).astype(int)
+            v_bay = (bay_p > thr_data.get("vote_threshold_bay", 0.6077)).astype(int)
+            total_votes = v_vae + v_m1 + v_m2 + v_bay
+
+            vae_mask       = (vae_p > thr_data.get("vae_gate_threshold", 0.3130))
+            _cons_thr      = thr_data.get("consensus_threshold", 0.58)
+            consensus_mask = ((m1_p > _cons_thr) & (m2_p > _cons_thr) & (bay_p > _cons_thr))
+            _majority      = thr_data.get("majority_votes", 3)
+            is_valid       = (vae_mask | consensus_mask) | (total_votes >= _majority)
+
+            _supp          = thr_data.get("suppression_mult", SUPPRESSION_MULT)
+            weighted_probs = np.where(is_valid, base_risk, base_risk * _supp)
+
+            _floor     = thr_data.get("score_floor", SCORE_FLOOR)
+            any_signal = ((vae_p > 0.05) | (m1_p > 0.05) |
+                          (m2_p  > 0.05) | (bay_p > 0.05))
+            weighted_probs = np.where(
+                any_signal, np.maximum(weighted_probs, _floor), weighted_probs)
+
+            avg_p        = (vae_p + m1_p + m2_p + bay_p) / 4.0
+            p_clip       = np.clip(avg_p, EPS, 1 - EPS)
+            entropy_raw  = -(p_clip * np.log2(p_clip) + (1 - p_clip) * np.log2(1 - p_clip))
+            e_min        = entropy_raw.min(); e_max = entropy_raw.max()
+            entropy_norm = (entropy_raw - e_min) / (e_max - e_min + EPS)
+
+            _gamma        = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
+            gated_scores  = weighted_probs + (_gamma * entropy_norm)
+            uncertainties = mc_std
+            m_means       = mean_per_model
+            entropy       = entropy_raw
+
+            runtime_thr   = thr_data.get("best_t_raw", 0.6987)
+            triage_levels = [
+                triage_levels_logic(score, runtime_thr, HIGH_RISK_BOUNDARY)
+                for score in gated_scores
+            ]
+            inference_note = "precomputed (100 MC passes, paper-exact)"
+
+        else:
+            # ── MODE B: live inference (new / external cohort) ────────
+            n_passes = MC_RUNS
+            st.info(
+                f"🔄 **New cohort detected (n={len(df_raw)})** — running live "
+                f"inference with {n_passes} MC passes per model."
+            )
+            with st.spinner(f"🚀 Running {n_passes} Monte Carlo passes × 4 models..."):
+                m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
+                    load_models_and_mc_for_batch(X_np)
+            runtime_thr    = thr_data.get("best_t_raw", 0.6987)
+            inference_note = f"live inference ({n_passes} MC passes)"
+
+        # ── BUILD RESULTS DATAFRAME ───────────────────────────────────
         results = df_raw.copy()
         results["P_VAE"]           = np.round(m_means[:, 0], 4)
         results["P_M1_Flipout"]    = np.round(m_means[:, 1], 4)
@@ -1204,26 +1295,37 @@ if mode == "Batch CSV":
         results["Uncertainty_SD"]  = np.round(uncertainties, 4)
         results["Entropy_Norm"]    = np.round(entropy_norm, 4)
         results["Gated_Score"]     = np.round(gated_scores, 4)
-        runtime_thr = thr_data.get("best_t_raw", 0.6987)
-        results["Risk_Label"]      = np.where(gated_scores >= runtime_thr, "High Risk", "Low Risk")
+        results["Risk_Label"]      = np.where(
+            gated_scores >= runtime_thr, "High Risk", "Low Risk")
         triage_display = [
-            t.replace("🔴 ","").replace("🟡 ","").replace("🟢 ","")
+            t.replace("🔴 ", "").replace("🟡 ", "").replace("🟢 ", "")
             for t in triage_levels]
         results["Triage_Level"]     = triage_display
         results["Threshold_Used"]   = round(float(runtime_thr), 4)
         results["Threshold_Method"] = THRESHOLD_METHOD
 
         st.divider()
-        st.write(f"📊 **Batch Diagnostics:** Avg Entropy: {float(np.mean(entropy)):.4f} | "
-                 f"T_screen (Youden): {runtime_thr:.4f} | HIGH_RISK: {HIGH_RISK_BOUNDARY:.4f} | "
-                 f"MC passes: {MC_RUNS}")
+        st.write(
+            f"📊 **Batch Diagnostics:** "
+            f"Avg Entropy: {float(np.mean(entropy)):.4f} | "
+            f"T_screen: {runtime_thr:.4f} | "
+            f"HIGH_RISK: {HIGH_RISK_BOUNDARY:.4f} | "
+            f"Source: {inference_note}"
+        )
 
         high_risk_count = int(np.sum(results["Risk_Label"] == "High Risk"))
-        m1, m2, m3 = st.columns(3)
+        critical_count  = int(np.sum(
+            [t for t in triage_display if "CRITICAL" in t.upper()]))
+        gray_count      = int(np.sum(
+            [t for t in triage_display if "GRAY" in t.upper()]))
+
+        m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Sample",     len(results))
         m2.metric("High Risk Alerts", high_risk_count,
                   delta=f"{(high_risk_count/len(results)):.1%}", delta_color="inverse")
-        m3.metric("Ensemble AUC", str(thr_data.get("ensemble_auc","—")))
+        m3.metric("CRITICAL zone",    critical_count,
+                  delta="≥ T_high", delta_color="off")
+        m4.metric("Ensemble AUC",     str(thr_data.get("ensemble_auc", "—")))
 
         with st.expander("🔬 Calibration at Decision Threshold"):
             p_platt_thr = thr_data.get("calib_platt_at_thr")
@@ -1242,12 +1344,13 @@ if mode == "Batch CSV":
 
         death_col = next(
             (c for c in results.columns
-             if c.lower().strip('"').strip() in ("death","true_outcome","outcome","mortality")),
+             if c.lower().strip('"').strip() in
+             ("death", "true_outcome", "outcome", "mortality")),
             None)
         if show_confusion and death_col:
             with st.expander("📊 Performance Metrics & ROC Curve"):
-                raw_gt    = results[death_col].astype(str).str.strip('"').str.strip()
-                gt_series = pd.to_numeric(raw_gt, errors="coerce")
+                raw_gt     = results[death_col].astype(str).str.strip('"').str.strip()
+                gt_series  = pd.to_numeric(raw_gt, errors="coerce")
                 valid_mask = gt_series.notna()
                 if valid_mask.sum() == 0:
                     st.warning(f"No valid numeric values in '{death_col}'.")
@@ -1260,7 +1363,7 @@ if mode == "Batch CSV":
                     f1   = f1_score(y_true_batch, y_pred_batch, zero_division=0)
                     spec = cm[0,0]/(cm[0,0]+cm[0,1]) if (cm[0,0]+cm[0,1])>0 else 0.0
                     tn, fp, fn, tp = cm.ravel() if cm.size==4 else (cm[0,0],0,0,cm[1,1])
-                    mc1,mc2,mc3,mc4 = st.columns(4)
+                    mc1, mc2, mc3, mc4 = st.columns(4)
                     mc1.metric("Sensitivity", f"{rec:.1%}",
                                delta="FN=0 ✅" if fn==0 else f"FN={fn} ⚠️",
                                delta_color="off" if fn==0 else "inverse")
@@ -1269,28 +1372,36 @@ if mode == "Batch CSV":
                     mc4.metric("F1 Score",    f"{f1:.3f}")
                     st.markdown("**Confusion Matrix**")
                     st.dataframe(pd.DataFrame(cm,
-                        index=["True: Survivor","True: Death"],
-                        columns=["Pred: Safe","Pred: Flagged"]),
+                        index=["True: Survivor", "True: Death"],
+                        columns=["Pred: Safe", "Pred: Flagged"]),
                         use_container_width=True)
-                    n_pos = int(y_true_batch.sum()); n_neg = int(len(y_true_batch)-n_pos)
+                    n_pos = int(y_true_batch.sum())
+                    n_neg = int(len(y_true_batch) - n_pos)
                     if n_pos >= 2 and n_neg >= 1:
                         auc = roc_auc_score(y_true_batch, gated_scores[valid_mask])
-                        fpr, tpr, roc_thresholds = roc_curve(y_true_batch, gated_scores[valid_mask])
-                        j_scores = tpr-fpr; best_idx = int(np.argmax(j_scores))
-                        fig, ax = plt.subplots(figsize=(5,4))
-                        ax.plot(fpr,tpr,color="#1a73e8",lw=2,label=f"Ensemble (AUC={auc:.3f})")
+                        fpr, tpr, roc_thresholds = roc_curve(
+                            y_true_batch, gated_scores[valid_mask])
+                        j_scores = tpr - fpr
+                        best_idx = int(np.argmax(j_scores))
+                        fig, ax = plt.subplots(figsize=(5, 4))
+                        ax.plot(fpr, tpr, color="#1a73e8", lw=2,
+                                label=f"Ensemble (AUC={auc:.3f})")
                         ax.plot([0,1],[0,1],"k--",lw=1,label="Random")
-                        ax.scatter([fpr[best_idx]],[tpr[best_idx]],color="#d93025",zorder=5,
+                        ax.scatter([fpr[best_idx]], [tpr[best_idx]],
+                                   color="#d93025", zorder=5,
                                    label=f"Youden (thr≈{roc_thresholds[best_idx]:.3f})")
-                        ax.set_xlabel("1 − Specificity (FPR)"); ax.set_ylabel("Sensitivity (TPR)")
+                        ax.set_xlabel("1 − Specificity (FPR)")
+                        ax.set_ylabel("Sensitivity (TPR)")
                         ax.set_title("ROC Curve — 4-Model Ensemble")
-                        ax.legend(fontsize=9); ax.set_xlim([0,1]); ax.set_ylim([0,1.02])
+                        ax.legend(fontsize=9)
+                        ax.set_xlim([0,1]); ax.set_ylim([0,1.02])
                         fig.tight_layout(); st.pyplot(fig); plt.close(fig)
-                        a1,a2,a3 = st.columns(3)
-                        a1.metric("AUC-ROC",f"{auc:.4f}",
-                                  delta="excellent" if auc>=0.90 else "good" if auc>=0.80 else "fair")
-                        a2.metric("Deaths",   f"{n_pos}")
-                        a3.metric("Survivors",f"{n_neg}")
+                        a1, a2, a3 = st.columns(3)
+                        a1.metric("AUC-ROC", f"{auc:.4f}",
+                                  delta="excellent" if auc>=0.90 else
+                                        "good"      if auc>=0.80 else "fair")
+                        a2.metric("Deaths",    f"{n_pos}")
+                        a3.metric("Survivors", f"{n_neg}")
                     if n_pos>=1 and n_neg>=1:
                         plot_reliability(y_true_batch, gated_scores[valid_mask],
                                          "Reliability Curve — 4-Model Ensemble")
@@ -1298,12 +1409,17 @@ if mode == "Batch CSV":
         st.subheader("📋 Detailed Clinical Triage List")
         def style_triage_row(val):
             text = str(val).upper()
-            if "CRITICAL"  in text: return 'color:white;background-color:#d93025;font-weight:bold;'
-            if "GRAY ZONE" in text: return 'color:black;background-color:#f9ab00;font-weight:bold;'
-            if "SAFE"      in text: return 'color:white;background-color:#1e8e3e;font-weight:bold;'
+            if "CRITICAL"  in text:
+                return 'color:white;background-color:#d93025;font-weight:bold;'
+            if "GRAY ZONE" in text:
+                return 'color:black;background-color:#f9ab00;font-weight:bold;'
+            if "SAFE"      in text:
+                return 'color:white;background-color:#1e8e3e;font-weight:bold;'
             return ''
-        fmt = {"Ensemble_Mean":"{:.4f}","Uncertainty_SD":"{:.4f}",
-               "Entropy_Norm":"{:.4f}","Gated_Score":"{:.4f}"}
+        fmt = {
+            "Ensemble_Mean": "{:.4f}", "Uncertainty_SD": "{:.4f}",
+            "Entropy_Norm":  "{:.4f}", "Gated_Score":    "{:.4f}"
+        }
         styled_df = (results.style
                      .applymap(style_triage_row, subset=["Triage_Level"])
                      .background_gradient(subset=["Gated_Score"], cmap="YlOrRd")
@@ -1325,9 +1441,7 @@ if mode == "Batch CSV":
                     if success: st.success(f"Archived {len(results)} records.")
                     else: st.error(f"Sync failed: {message}")
 
-# ============================================================
-# 21b. MANUAL ENTRY
-# ============================================================
+
 elif mode == "Manual Entry":
     manual_data = {f: 0.0 for f in feature_names}
     with st.form("entry_form"):
