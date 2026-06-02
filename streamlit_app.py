@@ -1202,11 +1202,14 @@ if mode == "Batch CSV":
         #   On cloud: MC_RUNS=20 (memory safe but noisier).
         #   On local: MC_RUNS=100 (paper-exact).
         # ─────────────────────────────────────────────────────────────
-        PRECOMPUTED_PATH = OUTPUTS_DIR / "ensemble_mc_probs.npy"
+        GATED_PATH  = OUTPUTS_DIR / "gated_scores_validated.npy"
+        MEANS_PATH  = OUTPUTS_DIR / "mean_per_model_validated.npy"
         use_precomputed  = (
-            PRECOMPUTED_PATH.exists() and
+            GATED_PATH.exists() and
+            MEANS_PATH.exists() and
             len(df_raw) == 233
         )
+        
 
         if use_precomputed:
             # ── MODE A: precomputed 100-pass probabilities ────────────
