@@ -265,9 +265,11 @@ def triage_levels_logic(score, threshold, high_risk_boundary=None):
         high_risk_boundary = HIGH_RISK_BOUNDARY
     try:
         s = float(score)
-        if s >= high_risk_boundary:
+        # Use tiny epsilon for boundary patients (e.g. GA=0.8649 exactly)
+        EPS_THR = 1e-9
+        if s >= (high_risk_boundary - EPS_THR):
             return "🔴 CRITICAL"
-        elif s >= threshold:
+        elif s >= (threshold - EPS_THR):
             return "🟡 GRAY ZONE"
         else:
             return "🟢 SAFE"
