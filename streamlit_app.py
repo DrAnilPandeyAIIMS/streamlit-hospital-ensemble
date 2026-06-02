@@ -1234,7 +1234,7 @@ if mode == "Batch CSV":
 
             runtime_thr   = thr_data.get("best_t_raw", 0.6987)
             triage_levels = [
-                triage_levels_logic(score, runtime_thr, HIGH_RISK_BOUNDARY)
+                triage_levels_logic(score, runtime_thr, 0.8649)
                 for score in gated_scores
             ]
             inference_note = "validated scores (paper-exact: TP=13 FP=37 FN=0)"
