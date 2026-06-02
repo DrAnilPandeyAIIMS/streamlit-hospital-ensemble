@@ -1,0 +1,142 @@
+# ========================================
+# 1) IGNORE EVERYTHING IN MODELS BY DEFAULT
+# ========================================
+models/*
+
+# ========================================
+# 2) ALLOW DIRECTORY TRAVERSAL
+# ========================================
+!models/
+!models/outputs/
+
+# ========================================
+# 3) REQUIRED RUNTIME ARTIFACTS (ALLOW)
+# ========================================
+!models/scaler.pkl
+!models/feature_names.pkl
+!models/y_test.npy
+!models/X_test.pkl
+
+!models/outputs/percentile_info.json
+!models/outputs/best_threshold.json
+!models/outputs/chosen_calibrator_info.json
+!models/outputs/final_labels_info.json
+!models/outputs/ensemble_mean_raw.npy
+
+
+# ========================================
+# 4) LARGE MODELS - ALLOW FOR STREAMLIT CLOUD
+# ========================================
+# NOTE: .h5 models MUST be committed for Cloud deployment
+# models/*.h5  <-- COMMENTED OUT to allow Cloud deployment
+models/*.pb
+models/*.onnx
+models/*.tflite
+models/*.ckpt
+models/*.joblib
+models/saved_model/
+models/variables/
+models/outputs/*.pkl
+# ----------------------------------------
+# Allow deployment ensemble folder
+# ----------------------------------------
+!models/outputs/ensemble_model_2/
+!models/outputs/ensemble_model_2/**
+!models/outputs/ensemble_model_2/*.pkl
+!models/outputs/ensemble_model_1/
+!models/outputs/ensemble_model_1/**
+!models/outputs/ensemble_model_1/*.pkl
+
+
+# ========================================
+# 5) OTHER GENERATED DIRECTORIES
+# ========================================
+artifacts/
+output/
+logs/
+
+# ========================================
+# 6) DATA FILES (IGNORE)
+# ========================================
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.parquet
+*.feather
+*.zip
+*.gz
+
+# ========================================
+# 7) PYTHON CACHE
+# ========================================
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# ========================================
+# 8) ENVIRONMENT
+# ========================================
+.env
+.venv/
+env/
+venv/
+
+# ========================================
+# 9) OS / EDITOR
+# ========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ========================================
+# 10) STREAMLIT FILES (KEEP)
+# ========================================
+!streamlit_app.py
+!custom_layers/**
+!requirements.txt
+!.gitignore
+!README.md
+!.streamlit/config.toml
+
+# ========================================
+# 11) CLOUD CREDENTIALS (NEVER COMMIT)
+# ========================================
+# ========================================
+# 11) CLOUD CREDENTIALS (NEVER COMMIT)
+# ========================================
+# Block the specific Google key by its NEW name
+gsheets_credentials.json
+.streamlit/secrets.toml
+secrets.toml
+
+# Block all other JSON by default to prevent leaks
+*.json
+# --- SECURITY: BLOCK SENSITIVE CREDENTIALS ---
+secrets.toml
+.streamlit/secrets.toml
+gsheets_credentials.json
+key.txt
+private_key.txt
+converted_key.txt
+
+# --- SECURITY: BLOCK PATIENT DATA ---
+clinical_audit_final.csv
+
+# --- DEPLOYMENT: WHITELIST CRITICAL THRESHOLD ---
+# Block all JSONs to prevent accidental leaks, but whitelist the production threshold
+*.json
+!models/outputs/ensemble_model_2/threshold_raw.json
+!models/outputs/ensemble_model_1/threshold_raw.json
+!models/outputs/ensemble_model_1/platt_calibrator.pkl
+!models/outputs/ensemble_model_1/isotonic_reg.pkl
+!models/outputs/ensemble_model_1/beta_reg.pkl
+
+# --- CLEANUP: IGNORE LEGACY BACKUPS ---
+archive/
+*.txt
+echo token_hugging_face.txt >> .gitignore
+echo 0.8649 >> .gitignore
+echo bayesian_model.h5 >> .gitignore
+echo vae_model.h5 >> .gitignore

@@ -1314,10 +1314,8 @@ if mode == "Batch CSV":
         )
 
         high_risk_count = int(np.sum(results["Risk_Label"] == "High Risk"))
-        critical_count  = int(np.sum(
-            [t for t in triage_display if "CRITICAL" in t.upper()]))
-        gray_count      = int(np.sum(
-            [t for t in triage_display if "GRAY" in t.upper()]))
+        critical_count  = sum(1 for t in triage_display if "CRITICAL" in t.upper())
+        gray_count      = sum(1 for t in triage_display if "GRAY"     in t.upper())
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Total Sample",     len(results))
