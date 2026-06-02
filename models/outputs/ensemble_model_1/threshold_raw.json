@@ -18,7 +18,7 @@
   "best_threshold": 0.40008001598653065,
   "best_t_raw": 0.6986387701363892,
   "threshold_method": "Youden_4model_majority3",
-  "high_risk_threshold": 0.6249999999895833,
+  "high_risk_threshold": 0.8649,
   "j_score": 1.0,
   "thr_search_diag": 0.49989997997517,
   "thr_entropy_diag": 0.4623298215859539,
