@@ -139,4 +139,4 @@ archive/
 echo token_hugging_face.txt >> .gitignore
 echo 0.8649 >> .gitignore
 echo bayesian_model.h5 >> .gitignore
-echo vae_model.h5 >> .gitignore
+echo vae_model.h5 >> .gitignore!models/outputs/ensemble_model_1/ensemble_mc_probs.npy 
