@@ -69,7 +69,7 @@ real-time mortality risk assessment. All risk thresholds are derived mathematica
 Youden's J statistic, calibrated for maximum sensitivity with minimum false alerts.
 Model weights are performance-normalized (Rokach 2010): w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5).
 """)
-st.caption(f"System Operational | Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+st.caption(f"System Operational | Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | App v2.0 — Smart imputation active | MC={MC_RUNS}")
 
 with st.spinner("⏳ Initializing models..."):
     pass
@@ -386,7 +386,7 @@ if scaler is not None:
         ]
         scalable_columns = SCALABLE_FEATURES[:scaler.n_features_in_]
 
-st.success(f"✅ System aligned: {len(feature_names)} features | {len(SCALABLE_INDICES)} scalable | 4-model ensemble")
+st.success(f"✅ System aligned: {len(feature_names)} features | {len(SCALABLE_INDICES)} scalable | 4-model ensemble | MC={MC_RUNS} | v2.0")
 
 # ============================================================
 # 9. CALIBRATORS
