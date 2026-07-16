@@ -1287,15 +1287,28 @@ if mode == "Batch CSV":
                 _impute = (_surg_means.get(_patient_surg, _overall_means)
                            if _patient_surg else _overall_means)
 
-                # Fill missing values
+                # Physiological range checks + fill missing
+                _PHYSIO = {
+                    "ALP":(5,2000),"PreOpTLC":(1000,80000),
+                    "PostOpTLC":(500,80000),"PreOpSGOT":(5,5000),
+                    "PostOpSGOT":(5,5000),"PreopCreat":(0.1,20),
+                    "PostopCreat":(0.1,30),"PreopSodium":(100,170),
+                    "PostOpSodium":(100,170),
+                }
                 for _col in feature_names:
-                    if pd.isna(df_aligned.iloc[_i][_col]):
+                    _loc = df_aligned.columns.get_loc(_col)
+                    _cur = df_aligned.iloc[_i, _loc]
+                    if pd.notna(_cur) and _col in _PHYSIO:
+                        _lo, _hi = _PHYSIO[_col]
+                        if float(_cur) < _lo or float(_cur) > _hi:
+                            df_aligned.iloc[_i, _loc] = np.nan
+                    if pd.isna(df_aligned.iloc[_i, _loc]):
                         if _col == "ASAclassification":
-                            df_aligned.iloc[_i, df_aligned.columns.get_loc(_col)] = 1.0
+                            df_aligned.iloc[_i, _loc] = 1.0
                         elif _col in _binary_cols:
-                            df_aligned.iloc[_i, df_aligned.columns.get_loc(_col)] = 0.0
+                            df_aligned.iloc[_i, _loc] = 0.0
                         else:
-                            df_aligned.iloc[_i, df_aligned.columns.get_loc(_col)] =                                 float(_impute.get(_col, 0.0))
+                            df_aligned.iloc[_i, _loc] =                                 float(_impute.get(_col, 0.0))
 
             X_np = df_aligned.values.astype(np.float32)
 
