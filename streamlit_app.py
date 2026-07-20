@@ -118,12 +118,19 @@ _m1 = _models_dir / "model_1_custom.h5"
 if _m1.exists() and _m1.stat().st_size < 10_000_000:
     _safe_delete(_m1)
 
-# bayesian_model/ — force delete for clean re-download of corrected model
+# bayesian_model/ — only delete if incomplete/corrupted, not on every rerun.
+# (Previously this ran unconditionally on every script execution, which on
+# Streamlit's rerun model caused concurrent executions to race: one thread
+# downloading/extracting while another deleted the folder mid-operation,
+# producing intermittent FileNotFoundError on both the model variables and
+# the downloaded zip file.)
 _bay_folder = _models_dir / "bayesian_model"
-if _bay_folder.exists():
+_bay_pb = _bay_folder / "saved_model.pb"
+_bay_vars = _bay_folder / "variables" / "variables.index"
+if _bay_folder.exists() and not (_bay_pb.exists() and _bay_vars.exists()):
     import shutil
     shutil.rmtree(str(_bay_folder), ignore_errors=True)
-    print("Force removed bayesian_model folder for clean re-download")
+    print("Removed incomplete bayesian_model folder for re-download")
 
 # vae_model.h5 must be ~0.8 MB
 _vae = _models_dir / "vae_model.h5"
@@ -530,7 +537,13 @@ def _ensure_model_downloaded(model_key: str) -> Path:
         hf_url = f"https://huggingface.co/{hf_repo}/resolve/main/{hf_file}?download=true"
         print(f"📥 Downloading {model_key} from HF direct URL...")
         print(f"  URL: {hf_url}")
-        zip_dest = path.parent / hf_file
+        # Unique per-process filename — prevents concurrent Streamlit
+        # reruns from colliding on the same zip path (one execution's
+        # unlink() succeeding while another still expects the file,
+        # which produced the "bayesian_model_corrected.zip not found"
+        # error seen when multiple reruns overlapped).
+        import os as _os
+        zip_dest = path.parent / f"{model_key}_{_os.getpid()}_{hf_file}"
         try:
             r = requests.get(hf_url, stream=True, timeout=600,
                              headers={"User-Agent": "Mozilla/5.0"})
