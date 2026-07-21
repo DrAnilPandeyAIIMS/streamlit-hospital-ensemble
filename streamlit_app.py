@@ -80,6 +80,205 @@ with st.spinner("⏳ Initializing models..."):
 BASE_DIR   = Path(__file__).resolve().parent
 MODELS_DIR = BASE_DIR / "models"
 OUTPUTS_DIR              = MODELS_DIR / "outputs" / "ensemble_model_1"
+
+
+# ============================================================
+# PREOPERATIVE-ONLY RISK ASSESSMENT — SEPARATE MODEL, SEPARATE UI
+# ============================================================
+# Distinct pathway from the deployed 4-model Bayesian ensemble.
+# Uses ONLY the 26 preoperative features (Methods, para 92) —
+# no postoperative feature is required, so it is usable before
+# surgery, when postoperative data genuinely does not exist yet.
+#
+# Model: HistGradientBoostingClassifier, trained on the same
+# 697-patient training split (random_state=27) as the main
+# pipeline. Chosen specifically because it natively supports
+# missing values (NaN) as a first-class input — a missing lab
+# is treated as informative and routed through a learned split
+# direction, rather than silently defaulted to 0.0 (which would
+# be numerically nonsensical and clinically misleading).
+#
+# Validated performance:
+#   Complete preop data:        AUC = 0.889 (held-out n=233)
+#   ~30% of lab values missing: AUC = 0.835 (robustness check)
+# The full postoperative ensemble (67 features, 24-48h window)
+# remains at AUC=0.9586 — this pre-op tool is intentionally a
+# separate, lower-stakes instrument matched to the amount of
+# information genuinely available before surgery.
+# ============================================================
+
+PREOP_MODEL_PATH    = MODELS_DIR / "preop_model_hgb.joblib"
+PREOP_ASA_MAP_PATH  = MODELS_DIR / "preop_asa_map.joblib"
+PREOP_FEATNAMES_PATH = MODELS_DIR / "preop_feature_names.joblib"
+
+PREOP_ASA_MAP = {
+    'ASA_one': 1, 'ASA_two': 2, 'ASA_three': 3, 'ASA_four': 4, 'ASA-E': 5
+}
+PREOP_COMORBIDITIES = [
+    'HIV+', 'def_Anemia', 'R_Arth', 'c_Pulm', 'DM', 'htn_C',
+    'hypo_Thy', 'liver_D', 'Mets', 'Obesity', 'ren_Fail',
+    'Tumor', 'MI', 'BA', 'CVA', 'ChroLiverDis', 'Hemiplegia'
+]
+PREOP_LABS = [
+    'PreOpTLC', 'PreopUrea', 'PreopCreat', 'PreopSodium',
+    'PreopPotassium', 'PreOpBilT', 'PreOpBilD', 'PreOpSGOT'
+]
+PREOP_FEATURES = PREOP_COMORBIDITIES + ['ASAclassification'] + PREOP_LABS
+
+LAB_HINTS = {
+    'PreOpTLC':       ("Pre-op Total Leukocyte Count (cells/mm\u00b3)", "typical 4,000-11,000"),
+    'PreopUrea':      ("Pre-op Urea (mg/dL)",                       "typical 15-45"),
+    'PreopCreat':     ("Pre-op Creatinine (mg/dL)",                 "typical 0.6-1.3"),
+    'PreopSodium':    ("Pre-op Sodium (mEq/L)",                     "typical 135-145"),
+    'PreopPotassium': ("Pre-op Potassium (mEq/L)",                  "typical 3.5-5.0"),
+    'PreOpBilT':      ("Pre-op Total Bilirubin (mg/dL)",            "typical 0.2-1.2"),
+    'PreOpBilD':      ("Pre-op Direct Bilirubin (mg/dL)",           "typical 0.0-0.3"),
+    'PreOpSGOT':      ("Pre-op SGOT/AST (U/L)",                     "typical 8-40"),
+}
+
+
+@st.cache_resource
+def load_preop_model():
+    if not PREOP_MODEL_PATH.exists():
+        st.error(f"\U0001F6A8 Preop model not found at {PREOP_MODEL_PATH}. "
+                 "Place preop_model_hgb.joblib in the models/ directory.")
+        st.stop()
+    return joblib.load(PREOP_MODEL_PATH)
+
+
+def _build_preop_dataframe_from_manual(inputs: dict) -> pd.DataFrame:
+    row = {}
+    for f in PREOP_COMORBIDITIES:
+        row[f] = float(inputs.get(f, 0.0))
+    row['ASAclassification'] = PREOP_ASA_MAP.get(inputs.get('ASAclassification'), np.nan)
+    for f in PREOP_LABS:
+        v = inputs.get(f, None)
+        row[f] = np.nan if v is None else float(v)
+    return pd.DataFrame([row])[PREOP_FEATURES]
+
+
+def _build_preop_dataframe_from_csv(df_raw: pd.DataFrame) -> pd.DataFrame:
+    df = df_raw.copy()
+    df.columns = df.columns.str.strip().str.strip('"')
+
+    if 'ASAclassification' in df.columns:
+        df['ASAclassification'] = df['ASAclassification'].astype(str).str.strip().map(PREOP_ASA_MAP)
+    else:
+        df['ASAclassification'] = np.nan
+
+    for f in PREOP_LABS:
+        if f in df.columns:
+            df[f] = pd.to_numeric(df[f], errors='coerce')
+        else:
+            df[f] = np.nan
+
+    for f in PREOP_COMORBIDITIES:
+        if f in df.columns:
+            df[f] = pd.to_numeric(df[f], errors='coerce').fillna(0.0)
+        else:
+            df[f] = 0.0
+
+    return df[PREOP_FEATURES]
+
+
+def render_preop_missing_summary(df_aligned: pd.DataFrame):
+    missing_counts = df_aligned[PREOP_LABS + ['ASAclassification']].isna().sum()
+    missing_counts = missing_counts[missing_counts > 0]
+    if len(missing_counts) > 0:
+        st.warning(
+            "\u26A0\uFE0F The following fields have missing values and will be handled "
+            "by the model's native missing-value logic (not imputed with a "
+            "guessed number):\n\n" +
+            "\n".join(f"- **{col}**: {n} patient(s) missing" for col, n in missing_counts.items())
+        )
+    else:
+        st.success("\u2705 No missing preoperative fields detected.")
+
+
+def run_preop_assessment_ui():
+    st.header("\U0001FA7A Preoperative Risk Assessment (Separate Model)")
+    st.info(
+        "This is a **distinct, lower-stakes model** from the main postoperative "
+        "ensemble. It uses only the **26 preoperative features** (comorbidities, "
+        "ASA classification, preoperative labs) - nothing that requires surgery "
+        "to have already happened. Validated AUC = 0.889 on complete data; "
+        "0.835 with ~30%% of lab values missing. This is NOT a substitute for "
+        "the full 67-feature postoperative ensemble (AUC=0.9586), which remains "
+        "the tool intended for the 24-48h postoperative monitoring window."
+    )
+
+    model = load_preop_model()
+    entry_mode = st.radio("Preop entry mode", ["Manual Entry", "Batch CSV"], key="preop_entry_mode")
+
+    if entry_mode == "Manual Entry":
+        with st.form("preop_entry_form"):
+            st.subheader("Comorbidities")
+            inputs = {}
+            cols = st.columns(3)
+            for i, f in enumerate(PREOP_COMORBIDITIES):
+                with cols[i % 3]:
+                    inputs[f] = 1.0 if st.checkbox(f, value=False, key=f"preop_{f}") else 0.0
+
+            st.subheader("ASA Classification")
+            inputs['ASAclassification'] = st.selectbox(
+                "ASA Classification", list(PREOP_ASA_MAP.keys()), key="preop_asa")
+
+            st.subheader("Preoperative Labs - leave blank if not available")
+            lab_cols = st.columns(2)
+            for i, f in enumerate(PREOP_LABS):
+                label, hint = LAB_HINTS[f]
+                with lab_cols[i % 2]:
+                    raw_val = st.text_input(f"{label} ({hint})", value="", key=f"preop_lab_{f}")
+                    inputs[f] = float(raw_val) if raw_val.strip() != "" else None
+
+            submitted = st.form_submit_button("Get Preoperative Risk Estimate")
+
+        if submitted:
+            df_aligned = _build_preop_dataframe_from_manual(inputs)
+            render_preop_missing_summary(df_aligned)
+
+            proba = model.predict_proba(df_aligned)[:, 1][0]
+            st.divider()
+            st.metric("Preoperative Mortality Risk Estimate", f"{proba:.1%}")
+            if proba >= 0.5:
+                st.error("Elevated preoperative risk signal - consider further preoperative optimisation / anaesthetic risk discussion.")
+            elif proba >= 0.2:
+                st.warning("Moderate preoperative risk signal.")
+            else:
+                st.success("Lower preoperative risk signal (based on available preoperative data only).")
+            st.caption(
+                "This estimate reflects only preoperative information. It does not "
+                "account for intraoperative events or postoperative course, and "
+                "should be interpreted as a preoperative planning aid, not a final "
+                "postoperative risk assessment."
+            )
+
+    else:  # Batch CSV
+        uploaded = st.file_uploader(
+            "Upload preoperative patient records (CSV). Leave lab cells blank "
+            "if not yet available - do not enter 0.",
+            type=["csv"], key="preop_csv_upload")
+        if uploaded:
+            df_raw = pd.read_csv(uploaded)
+            df_aligned = _build_preop_dataframe_from_csv(df_raw)
+            render_preop_missing_summary(df_aligned)
+
+            probas = model.predict_proba(df_aligned)[:, 1]
+            results = df_raw.copy()
+            results['Preop_Risk_Estimate'] = np.round(probas, 4)
+            results['Preop_Risk_Band'] = np.select(
+                [probas >= 0.5, probas >= 0.2],
+                ['Elevated', 'Moderate'],
+                default='Lower'
+            )
+            st.divider()
+            st.dataframe(results, use_container_width=True)
+            st.download_button(
+                "Download results as CSV",
+                results.to_csv(index=False).encode(),
+                "preop_risk_results.csv", "text/csv")
+
+
 RAW_THRESHOLD_PATH       = OUTPUTS_DIR / "threshold_raw.json"
 BETA_CALIBRATOR_PATH     = OUTPUTS_DIR / "beta_reg.pkl"
 ISOTONIC_CALIBRATOR_PATH = OUTPUTS_DIR / "isotonic_reg.pkl"
@@ -1243,7 +1442,7 @@ def calibrate_probs_runtime(arr):
 # 21. MAIN UI
 # ============================================================
 results = None
-mode    = st.radio("Select Entry Mode", ["Batch CSV", "Manual Entry"],
+mode    = st.radio("Select Entry Mode", ["Batch CSV", "Manual Entry", "Preoperative Assessment"],
                    key="entry_mode_selector")
 
 # ============================================================
@@ -1621,3 +1820,10 @@ elif mode == "Manual Entry":
         ok, err = append_to_gsheet(pd.DataFrame([audit_row]))
         if ok: st.success("✅ Patient record synced to clinical vault.")
         else: st.error(f"Sync failed: {err}")
+
+
+# ============================================================
+# 21c. PREOPERATIVE ASSESSMENT (separate model, see module above)
+# ============================================================
+elif mode == "Preoperative Assessment":
+    run_preop_assessment_ui()
