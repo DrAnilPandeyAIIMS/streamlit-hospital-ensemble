@@ -142,3 +142,6 @@ echo bayesian_model.h5 >> .gitignore
 echo vae_model.h5 >> .gitignore!models/outputs/ensemble_model_1/ensemble_mc_probs.npy 
 !models/outputs/ensemble_model_1/gated_scores_validated.npy 
 !models/outputs/ensemble_model_1/mean_per_model_validated.npy 
+ 
+# Preoperative assessment model - required runtime artifact 
+!models/preop_model_hgb.joblib 
