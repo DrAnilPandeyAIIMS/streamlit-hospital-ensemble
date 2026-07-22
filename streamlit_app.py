@@ -1244,6 +1244,15 @@ def append_to_gsheet(df, sheet_key=None, worksheet_name=None):
         if not existing_headers:
             existing_headers = list(df.columns)
             ws.insert_row(existing_headers, index=1)
+        else:
+            # Auto-extend header row for any genuinely new columns
+            # (e.g. m2_prob) instead of silently dropping them via
+            # reindex — this was the root cause of individual model
+            # scores never reaching the vault previously.
+            new_cols = [c for c in df.columns if c not in existing_headers]
+            if new_cols:
+                existing_headers = existing_headers + new_cols
+                ws.update('A1', [existing_headers])
         df_aligned     = df.reindex(columns=existing_headers).fillna("")
         rows_to_append = df_aligned.astype(str).values.tolist()
         ws.append_rows(rows_to_append, value_input_option="USER_ENTERED")
@@ -1815,7 +1824,18 @@ elif mode == "Manual Entry":
             "entropy"         : e_val,
             "entropy_norm"    : en_val,
             "j_score"         : J_SCORE,
-            "timestamp"       : pd.Timestamp.now().isoformat()
+            "timestamp"       : pd.Timestamp.now().isoformat(),
+            # ── Individual model scores — previously computed and shown
+            # on-screen (Model Committee Consensus tiles) but never
+            # persisted to the vault. "ensemble_mean" is the genuine
+            # overall average of all 4 models (matches its existing
+            # column meaning); "m2_prob" has no pre-existing column in
+            # the sheet, so append_to_gsheet will auto-create one. ──
+            "vae_prob"        : float(m_means[0, 0]),
+            "flipout_prob"    : float(m_means[0, 1]),
+            "m2_prob"         : float(m_means[0, 2]),
+            "bayesian_prob"   : float(m_means[0, 3]),
+            "ensemble_mean"   : ensemble_mean_val,
         })
         ok, err = append_to_gsheet(pd.DataFrame([audit_row]))
         if ok: st.success("✅ Patient record synced to clinical vault.")
