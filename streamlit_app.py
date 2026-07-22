@@ -1895,9 +1895,23 @@ elif mode == "Manual Entry":
             "bayesian_prob"   : float(m_means[0, 3]),
             "ensemble_mean"   : ensemble_mean_val,
         })
-        ok, err = append_to_gsheet(pd.DataFrame([audit_row]))
-        if ok: st.success("✅ Patient record synced to clinical vault.")
-        else: st.error(f"Sync failed: {err}")
+        # Sync to vault with a hard timeout — a slow or stuck network
+        # call here should never be able to freeze the entire page.
+        # Prediction results above are already rendered regardless of
+        # whether this sync succeeds.
+        import concurrent.futures
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+                future = ex.submit(append_to_gsheet, pd.DataFrame([audit_row]))
+                ok, err = future.result(timeout=8)
+            if ok: st.success("✅ Patient record synced to clinical vault.")
+            else: st.error(f"Sync failed: {err}")
+        except concurrent.futures.TimeoutError:
+            st.warning(
+                "⚠️ Clinical vault sync timed out (>8s) — prediction above "
+                "is unaffected. This patient was NOT logged to the vault. "
+                "If this persists, check the Google Sheets connection."
+            )
 
 
 # ============================================================
