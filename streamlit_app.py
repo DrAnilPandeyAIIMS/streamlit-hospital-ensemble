@@ -1064,6 +1064,37 @@ def ensure_single_output(arr):
         return a.ravel()
     return a.ravel()
 
+def mc_forward_pass(model, x):
+    """
+    Custom forward pass that decouples two behaviors a single
+    `training=True/False` flag would otherwise conflate:
+
+      - Dropout layers: run in STOCHASTIC mode (training=True),
+        since that randomness is exactly what Monte Carlo
+        uncertainty sampling needs.
+      - BatchNormalization layers: run in FROZEN mode
+        (training=True is what causes this whole issue —
+        it makes BatchNorm compute its normalization statistics
+        from whichever patients happen to be in the CURRENT
+        batch, rather than using the fixed statistics learned
+        during training. That means the same patient's predicted
+        risk could shift purely because of which other patients
+        were uploaded alongside them — the exact instability
+        traced through today's investigation.)
+
+    All other layers (Dense, DenseVariational, Activation, etc.)
+    pass through unaffected either way.
+    """
+    out = x
+    for layer in model.layers:
+        if isinstance(layer, tf.keras.layers.BatchNormalization):
+            out = layer(out, training=False)   # frozen population stats
+        elif isinstance(layer, tf.keras.layers.Dropout):
+            out = layer(out, training=True)    # stochastic, for MC sampling
+        else:
+            out = layer(out, training=True)
+    return out
+
 @st.cache_resource
 def load_small_objects():
     if scaler is None or not hasattr(scaler, "transform"):
@@ -1076,7 +1107,19 @@ scaler_cached, feature_names_cached = load_small_objects()
 # 14. MC INFERENCE — 4-MODEL ENSEMBLE
 # ============================================================
 mc_passes = MC_RUNS
-def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
+def load_models_and_mc_for_batch(X_np, n_forward_passes=30, use_frozen_batchnorm=False):
+    """
+    use_frozen_batchnorm=False (default): preserves existing behavior —
+        model(x, training=True) for every layer, including
+        BatchNormalization. Batch-composition-dependent (see
+        investigation notes, July 2026). Used by Batch CSV.
+    use_frozen_batchnorm=True: uses mc_forward_pass() to keep Dropout
+        stochastic (for MC sampling) while forcing BatchNormalization
+        to use its frozen, learned statistics — patient-independent
+        of whatever else is in the same call. Used by Manual Entry,
+        since a batch-of-one is the worst-case scenario for the
+        original behavior.
+    """
     model_keys = ["vae_model", "model_1", "model_2", "bayesian_model"]
     X_tensor   = tf.convert_to_tensor(np.asarray(X_np, dtype=np.float32))
 
@@ -1089,8 +1132,12 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
         mc_samples = []
         for i in range(n_forward_passes):
             tf.random.set_seed(42 + i)
-            raw = ensure_single_output(
-                model(X_tensor, training=True))
+            if use_frozen_batchnorm:
+                raw = ensure_single_output(
+                    mc_forward_pass(model, X_tensor))
+            else:
+                raw = ensure_single_output(
+                    model(X_tensor, training=True))
 
             # Bayesian: outputs raw logits — sigmoid mandatory
             if key == "bayesian_model":
@@ -1099,6 +1146,7 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30):
 
             # M2 corrected β=8.22e-8: correct direction — NO inversion
             mc_samples.append(raw)
+
 
         all_model_mc_means.append(
             np.mean(np.vstack(mc_samples), axis=0))
@@ -1459,6 +1507,15 @@ mode    = st.radio("Select Entry Mode", ["Batch CSV", "Manual Entry", "Preoperat
 # ============================================================
 if mode == "Batch CSV":
     st.header("📂 Batch Clinical Audit")
+    st.caption(
+        "⚠️ **Known limitation:** batch-level scores can shift slightly "
+        "depending on the size and composition of the uploaded file, due to "
+        "how normalization layers behave across a group of patients scored "
+        "together. This tool is intended for **research and retrospective "
+        "audit** use. For individual patient risk assessment, use **Manual "
+        "Entry**, which is unaffected by this and reflects the model's "
+        "intended single-patient design."
+    )
     uploaded = st.file_uploader("Upload Patient Records (CSV Format)", type=["csv"])
 
     if uploaded:
@@ -1710,7 +1767,8 @@ elif mode == "Manual Entry":
         X_manual = apply_training_scaling(df_manual)
 
         m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
-            load_models_and_mc_for_batch(X_manual, n_forward_passes=MC_RUNS)
+            load_models_and_mc_for_batch(X_manual, n_forward_passes=MC_RUNS,
+                                          use_frozen_batchnorm=True)
 
         current_triage    = triage_levels[0]
         adj_p             = float(gated_scores[0])
