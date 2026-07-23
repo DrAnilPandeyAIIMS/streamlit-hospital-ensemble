@@ -1851,6 +1851,45 @@ elif mode == "Manual Entry":
         mc3.metric("Probabilistic M2",    f"{m_means[0, 2]:.6f}", delta=f"w={M2_WEIGHT:.4f}", delta_color="off")
         mc4.metric("Bayesian MC",         f"{m_means[0, 3]:.6f}", delta=f"w={BAY_WEIGHT:.4f}", delta_color="off")
 
+        with st.expander("🔬 Debug: raw pre-sigmoid logits (VAE / Bayesian)"):
+            st.caption(
+                "Shows the model's internal value BEFORE the final sigmoid "
+                "squashes it into [0,1]. A probability of exactly 0.000000 "
+                "or 0.500000 could mean genuine extreme confidence, or a "
+                "numerical saturation artifact — the raw logit tells them apart."
+            )
+            def _raw_vae_logit(x_tensor):
+                vae_model = model_manager.load("vae_model")
+                out = x_tensor
+                for layer in vae_model.layers[:-1]:
+                    if isinstance(layer, tf.keras.layers.BatchNormalization):
+                        out = layer(out, training=False)
+                    else:
+                        out = layer(out, training=True)
+                kernel, bias = vae_model.layers[-1].get_weights()
+                logit = tf.matmul(out, kernel) + bias
+                return float(logit.numpy().ravel()[0])
+
+            def _raw_bay_logit(x_tensor):
+                bay_model = model_manager.load("bayesian_model")
+                out = mc_forward_pass(bay_model, x_tensor)
+                return float(np.asarray(out).ravel()[0])
+
+            try:
+                X_tensor_for_debug = tf.convert_to_tensor(np.asarray(X_manual, dtype=np.float32))
+                vae_logit = _raw_vae_logit(X_tensor_for_debug)
+                bay_logit = _raw_bay_logit(X_tensor_for_debug)
+                dcol1, dcol2 = st.columns(2)
+                dcol1.metric("VAE raw logit (pre-sigmoid)", f"{vae_logit:.4f}")
+                dcol2.metric("Bayesian raw logit (pre-sigmoid)", f"{bay_logit:.4f}")
+                st.caption(
+                    f"For reference: sigmoid saturates to float32 0.0 around "
+                    f"logit ≈ -87, and to float32 1.0 around logit ≈ +16. "
+                    f"sigmoid(0) = exactly 0.5."
+                )
+            except Exception as _dbg_e:
+                st.caption(f"Debug logit computation unavailable: {_dbg_e}")
+
         v_vae = int(m_means[0,0] > thr_data.get("vote_threshold_vae", 0.6259))
         v_m1  = int(m_means[0,1] > thr_data.get("vote_threshold_mid", 0.4830))
         v_m2  = int(m_means[0,2] > thr_data.get("vote_threshold_m2",  0.6086))
