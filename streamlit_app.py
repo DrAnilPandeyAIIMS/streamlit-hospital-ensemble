@@ -1198,8 +1198,19 @@ def load_models_and_mc_for_batch(X_np, n_forward_passes=30, use_frozen_batchnorm
     entropy_raw = -(p_clip * np.log2(p_clip) +
                     (1 - p_clip) * np.log2(1 - p_clip))
 
-    e_min = entropy_raw.min(); e_max = entropy_raw.max()
-    entropy_norm = (entropy_raw - e_min) / (e_max - e_min + EPS)
+    # FIXED entropy normalization bounds (replacing batch-relative
+    # min/max, which was undefined for single patients and made a
+    # given patient's score depend on whatever else was in the same
+    # upload). These bounds are the actual observed entropy range on
+    # the validated 233-patient cohort (mean_per_model_validated.npy),
+    # using this exact same formula — a fixed, defensible reference
+    # rather than an arbitrary constant. Now identical for a patient
+    # whether scored alone (Manual Entry) or within any batch (CSV).
+    FIXED_ENTROPY_MIN = 0.505915
+    FIXED_ENTROPY_MAX = 0.999487
+    e_min = FIXED_ENTROPY_MIN; e_max = FIXED_ENTROPY_MAX
+    entropy_norm = np.clip(
+        (entropy_raw - e_min) / (e_max - e_min + EPS), 0.0, 1.0)
 
     _gamma         = thr_data.get("gamma", thr_data.get("gamma_safety", 0.10))
     adjusted_probs = weighted_probs + (_gamma * entropy_norm)
@@ -1804,9 +1815,8 @@ elif mode == "Manual Entry":
                 st.metric("Risk Decision", "STABLE", delta="ROUTINE CARE")
             st.write(f"**Gated Score:** `{adj_p:.4f}`")
             st.caption(f"Threshold [{THRESHOLD_METHOD}]: {best_threshold_saved:.4f} | "
-                       f"Entropy: {e_val:.4f}"
-                       + (f" | Norm: {en_val:.4f}" if en_val > 0
-                          else " | Norm: N/A (single patient — batch norm not applicable)"))
+                       f"Entropy: {e_val:.4f} | Norm: {en_val:.4f} "
+                       f"(fixed reference: validated cohort range)")
         with res_col2:
             st.metric("Calibrated Risk (Platt)", f"{cal_p:.1%}")
             st.caption(f"Platt scaling — primary calibrator at n_events=13. "
@@ -1909,10 +1919,8 @@ elif mode == "Manual Entry":
             u1, u2, u3 = st.columns(3)
             u1.metric("Ensemble Std Dev", f"{float(uncertainties[0]):.4f}")
             u2.metric("Shannon Entropy",  f"{e_val:.4f}")
-            u3.metric("Entropy (norm)",
-                      f"{en_val:.4f}" if en_val > 0 else "N/A",
-                      delta="single-patient — batch norm not applicable" if en_val==0 else None,
-                      delta_color="off")
+            u3.metric("Entropy (norm)", f"{en_val:.4f}",
+                      delta="fixed reference range", delta_color="off")
 
         audit_row = {k: (float(v) if not isinstance(v, str) else v)
                      for k, v in manual_data.items()}
