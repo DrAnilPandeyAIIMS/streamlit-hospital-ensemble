@@ -62,12 +62,19 @@ st.set_page_config(
 )
 
 st.title("🏥 Clinical Ensemble Mortality Predictor")
-st.subheader("Validated Postoperative Risk Stratification System (2026)")
+st.subheader("Research Prototype — Internally Validated, Pending External Validation (2026)")
+st.warning(
+    "⚠️ **This is a research prototype accompanying a submitted manuscript, not a "
+    "certified clinical decision tool.** It is intended for demonstration and "
+    "supplementary reference only — never as a substitute for clinical judgement, "
+    "and not for unsupervised use in patient care. See the manuscript's Limitations "
+    "section for full detail."
+)
 st.markdown("""
-This system employs a memory-optimized four-model Bayesian ensemble to provide
-real-time mortality risk assessment. All risk thresholds are derived mathematically via
-Youden's J statistic, calibrated for maximum sensitivity with minimum false alerts.
-Model weights are performance-normalized (Rokach 2010): w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5).
+This system employs a four-model Bayesian ensemble to provide research-stage
+mortality risk estimates. Risk thresholds were derived mathematically via
+Youden's J statistic on an internal validation cohort. Model weights are
+performance-normalized (Rokach 2010): w_k = (AUC_k - 0.5) / Σ(AUC_j - 0.5).
 """)
 st.caption(f"System Operational | Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | App v2.0 — Smart imputation active")
 
