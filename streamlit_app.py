@@ -1767,8 +1767,13 @@ elif mode == "Manual Entry":
         X_manual = apply_training_scaling(df_manual)
 
         m_means, gated_scores, uncertainties, entropy, entropy_norm, triage_levels = \
-            load_models_and_mc_for_batch(X_manual, n_forward_passes=MC_RUNS,
-                                          use_frozen_batchnorm=True)
+            load_models_and_mc_for_batch(X_manual, n_forward_passes=MC_RUNS)
+        # REVERTED (see debug logit finding, July 22): frozen BatchNorm
+        # statistics produced catastrophic logit blow-up (observed
+        # VAE logit -8697, Bayesian logit -146416 — not genuine model
+        # confidence, a numerical artifact). Reverting to match Batch
+        # CSV's original behavior until the frozen moving_variance
+        # values themselves can be checked directly.
 
         current_triage    = triage_levels[0]
         adj_p             = float(gated_scores[0])
